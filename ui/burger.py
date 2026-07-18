@@ -247,30 +247,32 @@ def _draw_ingredient(p: QPainter, name: str, r: QRectF) -> None:
 
 
 class BurgerLoader(QWidget):
-    """Загрузчик: реалистичный бургер СОБИРАЕТСЯ слой за слоем.
+    """Загрузчик: САМОСТОЯТЕЛЬНАЯ зацикленная анимка сборки бургера.
 
-    Каждый слой падает сверху с отскоком (bounce) и сплющиванием при ударе.
-    Сборка привязана к прогрессу, но сама анимация падения идёт по времени
-    (плавно, независимо от рывков прогресса)."""
-    FALL_MS = 520  # длительность падения одного слоя
+    НЕ привязана к процентам (проценты — на полоске загрузчика). Один цикл (~3.8 c):
+      1) СБОРКА — слои влетают сверху по очереди с отскоком, чуть кренясь то влево,
+         то вправо, и сплющиваются при ударе;
+      2) ПРАЗДНИК — собранный бургер радостно подпрыгивает-джиглит, вокруг вспыхивают
+         искорки, сверху поднимается пар;
+      3) УПЛЫВАЕТ — бургер «подают»: взмывает вверх, уменьшается и тает;
+      4) цикл повторяется.
+    """
+    LOOP_MS = 3800
+    A_END = 0.56       # конец сборки
+    C_END = 0.74       # конец праздника
+    H_END = 0.86       # конец покачивания
+    # (O_END = 1.0 — уплывание)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(150, 150)
-        self._progress = 0.0
-        self._placed = 1                       # сколько слоёв «в игре» (нижняя булка сразу)
-        self._t = [0.0] * N_REAL               # 0..1 — насколько приземлился слой i
-        self._t[0] = 1.0                        # нижняя булка уже на месте
-        self._bounce = QEasingCurve(QEasingCurve.OutBounce)
+        self._t = 0.0
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
 
     def start(self) -> None:
-        self._progress = 0.0
-        self._placed = 1
-        self._t = [0.0] * N_REAL
-        self._t[0] = 1.0
+        self._t = 0.0
         self._timer.start()
         self.update()
 
@@ -278,64 +280,160 @@ class BurgerLoader(QWidget):
         self._timer.stop()
 
     def set_progress(self, frac: float) -> None:
-        self._progress = max(0.0, min(1.0, frac))
-        # сколько слоёв должно быть в сборке к этому прогрессу
-        want = max(1, min(N_REAL, 1 + math.ceil(self._progress * (N_REAL - 1) - 1e-6)))
-        self._placed = max(self._placed, want)
+        # Осознанно игнорируем: бургер живёт своей зацикленной жизнью,
+        # прогресс показывает полоска. Метод оставлен для совместимости.
         if not self._timer.isActive():
             self._timer.start()
 
     def _tick(self) -> None:
-        dt = self._timer.interval() / self.FALL_MS
-        for i in range(1, self._placed):
-            # Каскад: слой падает только когда предыдущий уже почти сел (>0.55).
-            # Так сборка всегда идёт по одному слою, даже если прогресс скакнул.
-            if self._t[i] < 1.0 and self._t[i - 1] > 0.55:
-                self._t[i] = min(1.0, self._t[i] + dt)
-                break
+        self._t = (self._t + self._timer.interval() / self.LOOP_MS) % 1.0
         self.update()
+
+    # ---- вспомогательное движение слоя при падении -----------------------
+
+    @staticmethod
+    def _layer_motion(raw: float, sign: int, fall_h: float, lw: float):
+        """(yoff, squash, xlean, rot) для слоя по его локальному прогрессу 0..1."""
+        if raw <= 0.0:
+            return -fall_h, 1.0, sign * 0.16 * lw, sign * 7.0
+        if raw < 0.55:                       # падение с ускорением + крен
+            fp = raw / 0.55
+            yoff = -(1.0 - fp * fp) * fall_h
+            return yoff, 1.0, sign * 0.16 * lw * (1 - fp), sign * 7.0 * (1 - fp)
+        if raw < 0.75:                       # удар — сплющивание
+            k = (raw - 0.55) / 0.20
+            return 0.0, 1.0 - 0.22 * math.sin(k * math.pi), 0.0, 0.0
+        k = (raw - 0.75) / 0.25              # оседание — лёгкий стретч
+        return 0.0, 1.0 + 0.07 * math.sin(k * math.pi), 0.0, 0.0
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        area = QRectF(18, 14, self.width() - 36, self.height() - 28)
+        t = self._t
+        W, H = self.width(), self.height()
+        cx = W / 2
+        area = QRectF(18, 14, W - 36, H - 28)
         base_w = area.width() * 0.9
         total = sum(l[1] for l in REAL_LAYERS)
-        cur_bottom = area.bottom()
-        fall_h = area.height() * 1.2
+        fall_h = area.height() * 1.15
 
-        for i in range(min(self._placed, N_REAL)):
+        # --- глобальные преобразования по фазам -------------------------------
+        g_dy = 0.0; g_scale = 1.0; g_sqy = 1.0; g_alpha = 1.0; g_rot = 0.0
+        raws = [1.0] * N_REAL
+        if t < self.A_END:                    # СБОРКА
+            slot = self.A_END / N_REAL
+            for i in range(N_REAL):
+                raws[i] = max(0.0, min(1.0, (t - i * slot * 0.82) / (slot * 1.5)))
+        elif t < self.C_END:                  # ПРАЗДНИК: подпрыгивание + джигл
+            k = (t - self.A_END) / (self.C_END - self.A_END)
+            g_dy = -14.0 * math.sin(k * math.pi) * (1 - 0.3 * k)
+            g_sqy = 1.0 - 0.14 * math.sin(k * math.pi * 3) * (1 - k)
+        elif t < self.H_END:                  # мягкое покачивание
+            k = (t - self.C_END) / (self.H_END - self.C_END)
+            g_dy = -3.0 * math.sin(k * math.pi * 2)
+        else:                                 # УПЛЫВАЕТ (подают)
+            k = (t - self.H_END) / (1.0 - self.H_END)
+            g_dy = -46.0 * (k * k)
+            g_scale = 1.0 - 0.32 * k
+            g_alpha = max(0.0, 1.0 - 1.25 * k)
+            g_rot = 8.0 * k
+
+        # --- тень под бургером (даёт «землю») --------------------------------
+        sh_squash = raws[0]                    # появляется вместе с нижней булкой
+        if g_alpha > 0.02:
+            p.setOpacity(0.22 * g_alpha * sh_squash)
+            p.setBrush(QColor(0, 0, 0)); p.setPen(Qt.NoPen)
+            sw = base_w * (0.9 + 0.12 * (1 - g_sqy)) * g_scale
+            p.drawEllipse(QPointF(cx, area.bottom() + 6 + g_dy * 0.15),
+                          sw / 2, area.height() * 0.05)
+            p.setOpacity(1.0)
+
+        # --- сам бургер (в глобальном преобразовании) ------------------------
+        p.save()
+        pivot_y = area.bottom()
+        p.translate(cx, pivot_y + g_dy)
+        p.rotate(g_rot)
+        p.scale(g_scale, g_scale * g_sqy)
+        p.translate(-cx, -pivot_y)
+        p.setOpacity(g_alpha)
+
+        cur_bottom = area.bottom()
+        for i in range(N_REAL):
             name, th, spread = REAL_LAYERS[i]
             lh = th / total * area.height()
             lw = base_w * (1 + spread)
             seat_top = cur_bottom - lh
-            raw = self._t[i]
+            raw = raws[i]
+            yoff, squash, xlean, rot = self._layer_motion(
+                raw, -1 if i % 2 else 1, fall_h, lw)
 
-            # Движение: падение (accel) → удар (сплющивание) → оседание (лёгкий стретч).
-            if raw < 0.6:
-                fp = raw / 0.6
-                yoff = -(1.0 - fp * fp) * fall_h
-                squash = 1.0
-            elif raw < 0.8:
-                yoff = 0.0
-                k = (raw - 0.6) / 0.2
-                squash = 1.0 - 0.20 * math.sin(k * math.pi)
-            else:
-                yoff = 0.0
-                k = (raw - 0.8) / 0.2
-                squash = 1.0 + 0.06 * math.sin(k * math.pi)
-
-            wscale = 1.0 + (1.0 - squash) * 0.6      # сплющивается → шире
+            wscale = 1.0 + (1.0 - squash) * 0.6
             draw_h = lh * squash
             draw_w = lw * wscale
-            cx = area.center().x()
-            # низ слоя закреплён на своём месте, сплющивание идёт вверх
-            top = (seat_top + (lh - draw_h)) + yoff
-            r = QRectF(cx - draw_w / 2, top, draw_w, draw_h)
-
+            top = seat_top + (lh - draw_h) + yoff
+            lx = cx + xlean
             alpha = min(1.0, raw / 0.12) if raw < 0.12 else 1.0
-            p.setOpacity(alpha)
-            _draw_ingredient(p, name, r)
-            p.setOpacity(1.0)
 
+            p.setOpacity(g_alpha * alpha)
+            if abs(rot) > 0.1:
+                p.save()
+                p.translate(lx, top + draw_h)
+                p.rotate(rot)
+                _draw_ingredient(p, name, QRectF(-draw_w / 2, -draw_h, draw_w, draw_h))
+                p.restore()
+            else:
+                _draw_ingredient(p, name, QRectF(lx - draw_w / 2, top, draw_w, draw_h))
             cur_bottom = seat_top
+        p.setOpacity(1.0)
+        p.restore()
+
+        # --- искры + пар (в фазе праздника) ----------------------------------
+        if self.A_END <= t < self.H_END:
+            self._draw_sparkles(p, t, area, cx)
+            self._draw_steam(p, t, area, cx)
+
+    # ---- эффекты ----------------------------------------------------------
+
+    def _draw_sparkles(self, p: QPainter, t: float, area: QRectF, cx: float) -> None:
+        k = (t - self.A_END) / (self.H_END - self.A_END)
+        top = area.top() + area.height() * 0.18
+        spots = [(-0.42, 0.15, 0.00), (0.44, 0.10, 0.18),
+                 (-0.30, 0.55, 0.36), (0.34, 0.50, 0.10), (0.0, -0.05, 0.28)]
+        for fx, fy, delay in spots:
+            lk = (k - delay) / 0.34
+            if lk <= 0 or lk >= 1:
+                continue
+            s = math.sin(lk * math.pi)              # 0→1→0
+            r = area.width() * 0.10 * s
+            x = cx + fx * area.width() * 0.55
+            y = top + fy * area.height()
+            p.setOpacity(s)
+            p.setBrush(QColor("#fff3c4")); p.setPen(Qt.NoPen)
+            star = QPainterPath()
+            star.moveTo(x, y - r); star.lineTo(x + r * 0.28, y - r * 0.28)
+            star.lineTo(x + r, y); star.lineTo(x + r * 0.28, y + r * 0.28)
+            star.lineTo(x, y + r); star.lineTo(x - r * 0.28, y + r * 0.28)
+            star.lineTo(x - r, y); star.lineTo(x - r * 0.28, y - r * 0.28)
+            star.closeSubpath()
+            p.drawPath(star)
+        p.setOpacity(1.0)
+
+    def _draw_steam(self, p: QPainter, t: float, area: QRectF, cx: float) -> None:
+        p.setPen(QPen(QColor("#ffffff"), max(2.0, area.width() * 0.02)))
+        p.setBrush(Qt.NoBrush)
+        top = area.top() + area.height() * 0.06
+        for wi, off in enumerate((-0.14, 0.0, 0.14)):
+            phase = (t * 6.0 + wi * 0.7)
+            path = QPainterPath()
+            x0 = cx + off * area.width()
+            path.moveTo(x0, top + area.height() * 0.10)
+            for s in range(1, 7):
+                fy = s / 6.0
+                x = x0 + math.sin(phase + fy * 4.2) * area.width() * 0.05
+                y = top + area.height() * 0.10 - fy * area.height() * 0.22
+                path.lineTo(x, y)
+            # верх пара тает
+            fade = 0.35 * (0.6 + 0.4 * math.sin(phase))
+            p.setOpacity(max(0.0, fade))
+            p.drawPath(path)
+        p.setOpacity(1.0)
