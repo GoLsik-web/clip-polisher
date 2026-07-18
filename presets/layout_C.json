@@ -1,0 +1,8 @@
+{
+  "preset": "C",
+  "description": "Лицо (вебка) на весь экран 9:16 (Just Chatting).",
+  "webcam_zone": {"x": 0.0, "y": 0.66, "w": 0.30, "h": 0.335},
+  "gameplay_zone": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+  "webcam_corner": "bottom_right",
+  "webcam_circle_ratio": 0.30
+}

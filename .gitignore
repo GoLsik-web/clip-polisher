@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Сборка PyInstaller / установщик (артефакты — не в репозиторий)
+build/
+dist/
+installer/Output/
+installer/*.exe
+
+# Модель Whisper (большая, качается при первом запуске)
+models/
+
+# Тестовые клипы и выводы рендера (большие бинарники)
+tests/sample_clips/*
+!tests/sample_clips/.gitkeep
+out/
+*.mp4
+*.mkv
+*.webm
+
+# Временное
+*.ass
+*.log
+.DS_Store
+Thumbs.db

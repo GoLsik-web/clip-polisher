@@ -1,0 +1,8 @@
+{
+  "preset": "D",
+  "description": "Геймплей сверху + вебка снизу (зеркально A).",
+  "webcam_zone": {"x": 0.0, "y": 0.73, "w": 0.235, "h": 0.265},
+  "gameplay_zone": {"x": 0.0, "y": 0.13, "w": 1.0, "h": 0.74},
+  "webcam_corner": "bottom_right",
+  "webcam_circle_ratio": 0.30
+}
