@@ -63,7 +63,10 @@ class MainWindow(QMainWindow):
         self._batch_sources: list[str] = []
         self._provisioning = False        # идёт докачка первого запуска
         self._provisioned_checked = False
-        self._update_info = None          # {version,url,size} если доступно обновление
+        self._update_info = None          # инфо релиза, если он НОВЕЕ (иначе None)
+        self._latest_info = None          # инфо последнего релиза (любого)
+        self._updates_dialog = None       # открытое меню обновлений
+        self._update_notified = False     # одноразовое уведомление показано
         self._updating = False
 
         self._build()
@@ -125,15 +128,13 @@ class MainWindow(QMainWindow):
         from core.version import __version__
         tag = QLabel(f"v{__version__}"); tag.setObjectName("tag")
         lay.addWidget(logo); lay.addWidget(self.mode_label); lay.addWidget(tag); lay.addStretch(1)
-        # Кнопка обновления — скрыта, всплывает если на GitHub есть версия новее.
-        self.update_btn = QPushButton("Обновить")
-        self.update_btn.setToolTip("Доступна новая версия — скачать и установить")
-        self.update_btn.setStyleSheet(
-            "background:#37c9c2;border:none;border-radius:8px;color:#06231f;"
-            "padding:7px 13px;font-weight:800;")
-        self.update_btn.clicked.connect(self._do_update)
-        self.update_btn.hide()
-        lay.addWidget(self.update_btn)
+        # Кнопка «Обновления» — ВСЕГДА видна. Тихая, когда версия актуальна;
+        # «загорается», когда доступно обновление. Открывает меню обновлений.
+        self.updates_btn = QPushButton("Обновления")
+        self.updates_btn.setToolTip("Проверить и установить обновления")
+        self.updates_btn.clicked.connect(self._open_updates)
+        self._style_updates_btn(has_update=False)
+        lay.addWidget(self.updates_btn)
         # По одному / Пачкой
         self.batch_single = QPushButton("По одному"); self.batch_single.setCheckable(True)
         self.batch_single.setChecked(True)
@@ -730,33 +731,88 @@ class MainWindow(QMainWindow):
     # Встроенное обновление
     # ======================================================================
 
+    def _style_updates_btn(self, has_update: bool) -> None:
+        if has_update:
+            self.updates_btn.setText("Обновление есть")
+            self.updates_btn.setStyleSheet(
+                "background:#37c9c2;border:none;border-radius:8px;color:#06231f;"
+                "padding:7px 13px;font-weight:800;")
+        else:
+            self.updates_btn.setText("Обновления")
+            self.updates_btn.setStyleSheet("")   # обычный вид из QSS — ненавязчиво
+
     def _check_update(self) -> None:
+        """Тихая фоновая проверка при старте."""
         if os.environ.get("CLIP_SKIP_UPDATE"):
             return
         t = self._track(W.UpdateCheckThread())
-        t.found.connect(self._update_found)
+        t.found.connect(self._on_update_found)
+        t.uptodate.connect(self._on_update_uptodate)
+        t.failed.connect(self._on_update_failed)
         t.start()
 
-    def _update_found(self, info: dict) -> None:
+    def _on_update_found(self, info: dict) -> None:
+        self._latest_info = info
         self._update_info = info
-        self.update_btn.setText(f"Обновить до v{info.get('version','?')}")
-        self.update_btn.show()
+        self._style_updates_btn(has_update=True)
+        if getattr(self, "_updates_dialog", None):
+            self._updates_dialog.set_state("update", info)
+        # Одноразовое ненавязчивое предложение зайти в меню обновлений.
+        if not getattr(self, "_update_notified", False):
+            self._update_notified = True
+            ver = info.get("version", "?")
+            ans = QMessageBox.information(
+                self, "Доступно обновление",
+                f"Вышла новая версия v{ver}.\nОткрыть меню обновлений — там «Что нового» "
+                "и кнопка обновления?",
+                QMessageBox.Open | QMessageBox.Cancel)
+            if ans == QMessageBox.Open:
+                self._open_updates()
+
+    def _on_update_uptodate(self, info: dict) -> None:
+        self._latest_info = info
+        self._update_info = None
+        self._style_updates_btn(has_update=False)
+        if getattr(self, "_updates_dialog", None):
+            self._updates_dialog.set_state("uptodate")
+
+    def _on_update_failed(self, err: str) -> None:
+        if getattr(self, "_updates_dialog", None):
+            self._updates_dialog.set_state("error", error=err)
+
+    def _open_updates(self) -> None:
+        from .updates_dialog import UpdatesDialog
+        from core.version import __version__
+        dlg = getattr(self, "_updates_dialog", None)
+        if dlg is None:
+            dlg = UpdatesDialog(__version__, accent="#37c9c2", parent=self)
+            dlg.setStyleSheet(self.styleSheet())   # единая тема с приложением
+            dlg.recheck.connect(self._dialog_recheck)
+            dlg.do_update.connect(self._do_update)
+            dlg.finished.connect(lambda _r: setattr(self, "_updates_dialog", None))
+            self._updates_dialog = dlg
+        # начальное состояние из того, что уже знаем
+        if self._update_info:
+            dlg.set_state("update", self._update_info)
+        elif self._latest_info:
+            dlg.set_state("uptodate")
+        else:
+            dlg.set_state("checking")
+            self._dialog_recheck()
+        dlg.show(); dlg.raise_(); dlg.activateWindow()
+
+    def _dialog_recheck(self) -> None:
+        if getattr(self, "_updates_dialog", None):
+            self._updates_dialog.set_state("checking")
+        self._check_update()
 
     def _do_update(self) -> None:
         if not self._update_info or self._updating:
             return
-        ver = self._update_info.get("version", "?")
-        size = self._update_info.get("size", 0)
-        mb = f" (~{size // (1<<20)} МБ)" if size else ""
-        ok = QMessageBox.question(
-            self, "Обновление",
-            f"Доступна версия v{ver}{mb}.\n\nСкачать и установить сейчас? "
-            "Приложение закроется, установит обновление поверх и запустится снова.\n\n"
-            "Скачивать заново с сайта не нужно.",
-            QMessageBox.Yes | QMessageBox.No)
-        if ok != QMessageBox.Yes:
-            return
         self._updating = True
+        if getattr(self, "_updates_dialog", None):
+            self._updates_dialog.accept()      # закрываем меню — прогресс в загрузчике
+        ver = self._update_info.get("version", "?")
         dst = os.path.join(tempfile.gettempdir(), f"ClipPolisher-Setup-{ver}.exe")
         self.loader.start()
         self.loader.title.setText("Обновление")
