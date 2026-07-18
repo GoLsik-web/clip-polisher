@@ -44,8 +44,12 @@ def current_version() -> str:
     return __version__
 
 
-def check_for_update(timeout: int = 15) -> Optional[dict]:
-    """Вернуть {'version', 'url', 'size'} если на GitHub есть версия новее, иначе None."""
+def latest_release(timeout: int = 15) -> Optional[dict]:
+    """Инфо о последнем релизе: {'version','url','size','notes','newer'}.
+
+    Возвращает None ТОЛЬКО при ошибке сети/данных (up-to-date — это валидный
+    ответ с newer=False). Так меню обновлений различает «нет обновления» и «нет сети».
+    """
     url = f"https://api.github.com/repos/{REPO}/releases/latest"
     req = urllib.request.Request(url, headers={
         "User-Agent": "ClipPolisher", "Accept": "application/vnd.github+json"})
@@ -58,9 +62,21 @@ def check_for_update(timeout: int = 15) -> Optional[dict]:
         if a.get("name", "").lower().endswith(".exe"):
             asset_url = a.get("browser_download_url")
             asset_size = int(a.get("size", 0) or 0)
-    if tag and asset_url and is_newer(tag):
-        return {"version": tag.lstrip("vV"), "url": asset_url, "size": asset_size}
-    return None
+    if not tag:
+        return None
+    return {
+        "version": tag.lstrip("vV"),
+        "url": asset_url,
+        "size": asset_size,
+        "notes": (data.get("body") or "").strip(),
+        "newer": bool(asset_url) and is_newer(tag),
+    }
+
+
+def check_for_update(timeout: int = 15) -> Optional[dict]:
+    """Вернуть инфо релиза, если он НОВЕЕ текущего, иначе None (для тихой проверки)."""
+    info = latest_release(timeout)
+    return info if (info and info.get("newer")) else None
 
 
 def download_installer(url: str, dst: str,

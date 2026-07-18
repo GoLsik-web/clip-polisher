@@ -91,20 +91,23 @@ class PreviewThread(QThread):
 
 
 class UpdateCheckThread(QThread):
-    """Фоновая проверка нового релиза на GitHub (тихо, без блокировки UI)."""
-    found = Signal(dict)     # {version, url, size}
-    none = Signal()
+    """Фоновая проверка релиза на GitHub. Различает: есть обнова / актуально / ошибка."""
+    found = Signal(dict)      # доступно обновление {version,url,size,notes,newer}
+    uptodate = Signal(dict)   # установлена последняя (инфо о релизе)
+    failed = Signal(str)      # нет сети / ошибка
 
     def run(self) -> None:
         try:
             from core import updater
-            info = updater.check_for_update()
-            if info:
+            info = updater.latest_release()
+            if not info:
+                self.failed.emit("нет данных о релизе")
+            elif info.get("newer"):
                 self.found.emit(info)
             else:
-                self.none.emit()
-        except Exception:  # noqa: BLE001 — нет сети/лимит API → просто молчим
-            self.none.emit()
+                self.uptodate.emit(info)
+        except Exception as e:  # noqa: BLE001 — нет сети/лимит API
+            self.failed.emit(str(e))
 
 
 class UpdateDownloadThread(QThread):
