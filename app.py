@@ -10,6 +10,16 @@ import sys
 
 
 def main() -> int:
+    # В собранном оконном .exe (console=False) sys.stdout/stderr == None.
+    # Любая библиотека, пишущая туда (tqdm в HuggingFace, логгинг), роняет приложение
+    # с «'NoneType' object has no attribute 'write'». Подставляем безопасный сток.
+    if sys.stderr is None or sys.stdout is None:
+        devnull = open(os.devnull, "w", encoding="utf-8")
+        if sys.stderr is None:
+            sys.stderr = devnull
+        if sys.stdout is None:
+            sys.stdout = devnull
+
     # Кириллица в логах и корректная кодировка на Windows.
     os.environ.setdefault("PYTHONUTF8", "1")
     logging.basicConfig(level=logging.INFO,
