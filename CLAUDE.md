@@ -34,6 +34,30 @@
   `<имя>_vertical.mp4` через `BatchRenderThread`/`pipeline.run_batch`. (Живьём в UI кликами
   не гонял — проверил конструкцию pcfg и импорт; движок run_batch проверен ядром.)
 
+**СБОРКА И РАЗДАЧА (сделано в эту же сессию):**
+- 📦 **Публичный репозиторий: https://github.com/GoLsik-web/clip-polisher**, релиз v1.0.0 с
+  установщиком `ClipPolisher-Setup-1.0.0.exe` (202 МБ). gh авторизован как GoLsik-web.
+- 🏗️ **PyInstaller** (`clip-polisher.spec`, onedir) → `dist\ClipPolisher\` (~791 МБ). НЕ включает
+  CUDA (исключён `nvidia`) и модель — иначе не влезает в лимит GitHub 2 ГБ. Исключены тяжёлые
+  неиспользуемые Qt-модули (QtWebEngine и пр.: PySide6 634→92 МБ). ffmpeg+ffprobe (полный
+  Gyan-билд, 462 МБ) кладутся в `_internal\ffmpeg\`; `ffmpeg_utils._bundled()` берёт их оттуда.
+  Пересборка: `python -m PyInstaller --noconfirm --clean clip-polisher.spec`.
+- 🧰 **Установщик — Inno Setup** (`installer\clip-polisher.iss`, ISCC в
+  `%LOCALAPPDATA%\Programs\Inno Setup 6\`). Ставит БЕЗ прав админа в
+  `%LOCALAPPDATA%\Programs\ClipPolisher`. Компиляция → `installer\Output\`. Цепочка
+  установка→запуск→удаление проверена (тихий режим). Размер сжатого установщика ~202 МБ.
+- 🌐 **Первый запуск (`core/provision.py`)**: качает модель large-v3 с HF (`Systran/
+  faster-whisper-large-v3`) + CUDA-колёса с PyPI (ЗАПИНЕНЫ под ctranslate2 4.8.1: cublas
+  12.9.2.10, cudnn 9.24.0.43, nvrtc 12.9.86; cuda-runtime НЕ нужен) в `%LOCALAPPDATA%\
+  ClipPolisher\{models,cuda}`. `transcribe.py` грузит модель оттуда (offline) и добавляет
+  CUDA-DLL в путь через `provision.add_cuda_to_path()`. UI: экран докачки при старте
+  (`_check_first_run`, поток `ProvisionThread`); пропуск — env `CLIP_SKIP_PROVISION=1`.
+  Ресурсы (шрифты/иконки) — через `core/resources.res()` (dev-корень / sys._MEIPASS).
+- ⚠️ **НЕ проверено вживую (нужен реальный первый запуск на 5 ГБ):** сам процесс докачки
+  модели+CUDA и транскрипция ИЗ установленного exe. Проверено: exe стартует (окно, 107 МБ),
+  URL-колёс резолвятся, пути ресурсов, установка/удаление. Стоит прогнать реальный первый
+  запуск на чистой машине/после очистки `%LOCALAPPDATA%\ClipPolisher`.
+
 **ЧТО ДАЛЬШЕ (по запросу пользователя, ПОСЛЕ фиксов — фичи):**
 - Safe-zone оверлеи под TikTok/Shorts (где UI площадки перекрывает кадр — чтобы субы/ник туда
   не попадали). Яркие субтитры с выделением ключевых слов (MrBeast-стиль). Профиль стримера
