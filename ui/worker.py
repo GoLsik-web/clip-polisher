@@ -90,6 +90,47 @@ class PreviewThread(QThread):
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
 
 
+class UpdateCheckThread(QThread):
+    """Фоновая проверка нового релиза на GitHub (тихо, без блокировки UI)."""
+    found = Signal(dict)     # {version, url, size}
+    none = Signal()
+
+    def run(self) -> None:
+        try:
+            from core import updater
+            info = updater.check_for_update()
+            if info:
+                self.found.emit(info)
+            else:
+                self.none.emit()
+        except Exception:  # noqa: BLE001 — нет сети/лимит API → просто молчим
+            self.none.emit()
+
+
+class UpdateDownloadThread(QThread):
+    """Скачивание установщика обновления с прогрессом."""
+    progress = Signal(float, str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url: str, dst: str, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._dst = dst
+
+    def run(self) -> None:
+        try:
+            from core import updater
+            def cb(got, total):
+                if total:
+                    self.progress.emit(got / total,
+                                       f"Скачиваю обновление {got // (1<<20)}/{total // (1<<20)} МБ")
+            updater.download_installer(self._url, self._dst, cb)
+            self.finished_ok.emit(self._dst)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+
+
 class ProvisionThread(QThread):
     """Первый запуск: докачка модели Whisper (+CUDA при NVIDIA) в папку пользователя."""
     progress = Signal(float, str)
