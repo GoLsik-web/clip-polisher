@@ -118,12 +118,13 @@ def needs_provision() -> bool:
 # --------------------------------------------------------------------------
 
 def _download(url: str, dst: str, on_bytes: Optional[Callable[[int, int], None]] = None) -> None:
-    """Скачать url в dst с колбэком (получено, всего)."""
+    """Скачать url в dst атомарно (через .part) с колбэком (получено, всего)."""
     req = urllib.request.Request(url, headers={"User-Agent": "ClipPolisher"})
+    part = dst + ".part"
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length", 0))
         got = 0
-        with open(dst, "wb") as f:
+        with open(part, "wb") as f:
             while True:
                 chunk = resp.read(1 << 20)   # 1 МБ
                 if not chunk:
@@ -132,6 +133,7 @@ def _download(url: str, dst: str, on_bytes: Optional[Callable[[int, int], None]]
                 got += len(chunk)
                 if on_bytes:
                     on_bytes(got, total)
+    os.replace(part, dst)   # готово целиком → только теперь занимаем итоговое имя
 
 
 def _pypi_win_wheel_url(pkg: str, version: Optional[str] = None) -> Optional[str]:
@@ -185,30 +187,60 @@ def ensure_cuda(on_progress: Optional[ProgressCb] = None) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+HF_BASE = "https://huggingface.co"
+
+
+def _hf_file_list(repo: str) -> list[str]:
+    """Список файлов модели в HF-репозитории (без сторонних либ и без tqdm)."""
+    url = f"{HF_BASE}/api/models/{repo}"
+    req = urllib.request.Request(url, headers={"User-Agent": "ClipPolisher"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    return [s.get("rfilename", "") for s in data.get("siblings", []) if s.get("rfilename")]
+
+
 def ensure_model(on_progress: Optional[ProgressCb] = None) -> str:
-    """Скачать модель large-v3 с HuggingFace в model_path(). Вернуть путь."""
+    """Скачать модель large-v3 напрямую с HuggingFace в model_path().
+
+    Качаем сами (urllib) — БЕЗ huggingface_hub/tqdm: в оконном .exe tqdm пишет в
+    stderr=None и роняет приложение. Даём реальный прогресс в МБ.
+    """
     if model_ready():
         return model_path()
-    from huggingface_hub import snapshot_download
-
     if on_progress:
         on_progress(0.0, "Скачиваю модель распознавания (~3 ГБ), это один раз…")
 
-    # Прогресс модели — по числу докачанных файлов (снапшот тянет несколько файлов).
-    try:
-        from huggingface_hub.utils import tqdm as hf_tqdm  # noqa: F401
-    except Exception:  # noqa: BLE001
-        pass
+    files = [f for f in _hf_file_list(MODEL_REPO)
+             if f.endswith((".bin", ".json", ".txt", ".model")) or "tokenizer" in f.lower()]
+    if not any(f.endswith("model.bin") for f in files):
+        raise RuntimeError("В репозитории модели не найден model.bin")
+    os.makedirs(model_path(), exist_ok=True)
 
-    snapshot_download(
-        repo_id=MODEL_REPO,
-        local_dir=model_path(),
-        local_dir_use_symlinks=False,
-        allow_patterns=["*.bin", "*.json", "*.txt", "*.model", "tokenizer*"],
-    )
+    # Мелкие файлы (конфиги/токенайзер) — быстро, отдаём им 0..8% прогресса;
+    # model.bin (~3 ГБ) — основное, 8..100%.
+    small = [f for f in files if not f.endswith("model.bin")]
+    for i, fn in enumerate(small):
+        if on_progress:
+            on_progress(0.08 * i / max(1, len(small)), f"Модель: {fn}")
+        _download(f"{HF_BASE}/{MODEL_REPO}/resolve/main/{fn}",
+                  _model_dst(fn), None)
+
+    def big_cb(got, total):
+        if on_progress and total:
+            on_progress(0.08 + 0.92 * (got / total),
+                        f"Модель: {got // (1 << 20)}/{total // (1 << 20)} МБ")
+    _download(f"{HF_BASE}/{MODEL_REPO}/resolve/main/model.bin",
+              _model_dst("model.bin"), big_cb)
+
     if on_progress:
         on_progress(1.0, "Модель готова")
     return model_path()
+
+
+def _model_dst(rel: str) -> str:
+    dst = os.path.join(model_path(), rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    return dst
 
 
 def ensure_runtime(on_progress: Optional[ProgressCb] = None,

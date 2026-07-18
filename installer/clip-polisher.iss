@@ -3,7 +3,7 @@
 ; Модель Whisper и CUDA-библиотеки НЕ входят — докачиваются при первом запуске.
 
 #define MyAppName "Полировщик клипов"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "GoLsik"
 #define MyAppExeName "ClipPolisher.exe"
 
@@ -22,6 +22,8 @@ OutputBaseFilename=ClipPolisher-Setup-{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\app.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
