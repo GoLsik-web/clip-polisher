@@ -1,0 +1,8 @@
+{
+  "preset": "B",
+  "description": "Геймплей на весь кадр + вебка круглым PiP в углу.",
+  "webcam_zone": {"x": 0.0, "y": 0.73, "w": 0.235, "h": 0.265},
+  "gameplay_zone": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+  "webcam_corner": "bottom_right",
+  "webcam_circle_ratio": 0.32
+}

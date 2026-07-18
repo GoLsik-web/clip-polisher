@@ -1,0 +1,457 @@
+<title>Клип-Полировщик — прототип интерфейса</title>
+<style>
+  :root{
+    --bg:#08080d;--panel:#111019;--panel2:#191826;--line:#2a2740;
+    --text:#f9f8ff;--muted:#c2bde0;--accent:#7c5cff;--accent-ink:#ffffff;
+    --dot:rgba(124,92,255,.10);--glow:rgba(124,92,255,.32);
+    --z-cam:#ff5aa0;--z-game:#5590ff;--z-sub:#f4b13f;--z-brand:#57d081;--z-plat:#ff8149;
+    --radius:12px;--radius-sm:8px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter",system-ui,sans-serif;
+    --mono:"SF Mono",ui-monospace,"Cascadia Code","Consolas",monospace;
+  }
+  @media (prefers-color-scheme:light){:root{--bg:#edeaf6;--panel:#fff;--panel2:#f3f1fb;--line:#e2ddf1;--text:#0d0b14;--muted:#443f58;--accent:#6a3cff;--accent-ink:#fff;--dot:rgba(106,60,255,.08);--glow:rgba(124,92,255,.19)}}
+  :root[data-theme="dark"]{--bg:#08080d;--panel:#111019;--panel2:#191826;--line:#2a2740;--text:#f9f8ff;--muted:#c2bde0;--accent:#7c5cff;--accent-ink:#fff;--dot:rgba(124,92,255,.10);--glow:rgba(124,92,255,.32)}
+  :root[data-theme="light"]{--bg:#edeaf6;--panel:#fff;--panel2:#f3f1fb;--line:#e2ddf1;--text:#0d0b14;--muted:#443f58;--accent:#6a3cff;--accent-ink:#fff;--dot:rgba(106,60,255,.08);--glow:rgba(124,92,255,.19)}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased}
+  h1,h2,h3{margin:0;text-wrap:balance}
+  .app{max-width:1380px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px;min-height:100vh;position:relative}
+
+  /* фоновая анимация: дрейф точечной сетки + «дышащее» свечение + лёгкие сканлайны */
+  .bg{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none;background:var(--bg)}
+  .bg canvas{position:absolute;inset:0;width:100%;height:100%}
+  .bg .grid-dots{position:absolute;inset:-40px;background-image:radial-gradient(circle,var(--dot) .9px,transparent 1.4px);background-size:26px 26px;opacity:.7;animation:drift 60s linear infinite}
+  .bg .glow{position:absolute;left:0;top:0;width:min(620px,58vw);aspect-ratio:1;border-radius:50%;background:radial-gradient(circle,var(--glow),transparent 62%);filter:blur(50px);will-change:transform}
+  .bg .scan{position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(255,255,255,.014) 3px 4px)}
+  @keyframes drift{to{transform:translate(26px,26px)}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  @keyframes ovIn{from{opacity:0}to{opacity:1}}
+  @keyframes popIn{from{opacity:0;transform:scale(.94) translateY(10px)}to{opacity:1;transform:none}}
+  .placeholder.show{animation:fadeUp .45s cubic-bezier(.16,1,.3,1)}
+  .overlay.show{animation:ovIn .3s ease}
+  .overlay.show .loader{animation:popIn .42s cubic-bezier(.16,1,.3,1)}
+  @media (prefers-reduced-motion:reduce){.placeholder.show,.overlay.show,.overlay.show .loader,.anim-in{animation:none !important}}
+  @media (prefers-reduced-motion:reduce){.bg .grid-dots,.bg .glow{animation:none}}
+
+  /* HUD-уголки на превью (ретро-футуризм) */
+  .screen::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:5;opacity:.9;
+    --s:16px;--t:2px;--c:color-mix(in srgb,var(--accent) 80%,#fff);
+    background:linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c)),linear-gradient(var(--c),var(--c));
+    background-repeat:no-repeat;
+    background-position:0 0,0 0,100% 0,100% 0,0 100%,0 100%,100% 100%,100% 100%;
+    background-size:var(--s) var(--t),var(--t) var(--s),var(--s) var(--t),var(--t) var(--s),var(--s) var(--t),var(--t) var(--s),var(--s) var(--t),var(--t) var(--s)}
+
+  /* моно техно-лейблы */
+  .pv-hd,.rl-hd,.vh,.tag{font-family:var(--mono)}
+  .pv-hd::before,.rl-hd::before{content:"// ";color:var(--accent)}
+  .pv-hd::after,.rl-hd::after{content:" _";opacity:.55}
+  .vh::before{content:"// ";color:var(--accent)}
+  .wtitle::before{content:"// ";color:var(--accent);font-family:var(--mono);font-weight:800}
+
+  /* мягкая разноцветность окон 1–6: каждому свой цвет, неярко */
+  #wizard .wstep{--sc:var(--accent)}
+  #wizard .wstep:nth-of-type(1){--sc:#7c5cff}
+  #wizard .wstep:nth-of-type(2){--sc:#5590ff}
+  #wizard .wstep:nth-of-type(3){--sc:#37c9c2}
+  #wizard .wstep:nth-of-type(4){--sc:#57d081}
+  #wizard .wstep:nth-of-type(5){--sc:#f0a93a}
+  #wizard .wstep:nth-of-type(6){--sc:#ff6ba6}
+  #wizard .wnum{color:var(--sc);border-color:color-mix(in srgb,var(--sc) 42%,var(--line))}
+  #wizard .wstep.active{border-color:var(--sc);box-shadow:0 0 0 2px color-mix(in srgb,var(--sc) 26%,transparent),0 16px 40px rgba(0,0,0,.28)}
+  #wizard .wstep.active .wnum{background:var(--sc);color:#fff;border-color:var(--sc)}
+  #wizard .wstep.done .wnum{background:color-mix(in srgb,var(--sc) 20%,transparent);color:var(--sc);border-color:color-mix(in srgb,var(--sc) 50%,var(--line))}
+  #wizard .wtitle::before{color:var(--sc)}
+  /* контролы внутри окна — в цвет этого окна */
+  #wizard input[type=range]{accent-color:var(--sc)}
+  #wizard .chip.on{background:var(--sc);border-color:var(--sc);color:#fff}
+  #wizard .sw2.on{background:color-mix(in srgb,var(--sc) 42%,transparent);border-color:var(--sc)}
+  #wizard .sw2.on::after{background:var(--sc)}
+  #wizard .btn.next{background:var(--sc);border-color:var(--sc);color:#fff}
+  #wizard .info:hover{color:var(--sc);border-color:var(--sc)}
+  #wizard .drop{border-color:color-mix(in srgb,var(--sc) 32%,var(--line))}
+  #wizard .preset.on{border-color:var(--sc);box-shadow:0 0 0 2px color-mix(in srgb,var(--sc) 35%,transparent)}
+  .topbar{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px}
+  .logo{display:flex;align-items:center;gap:9px;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;font-size:13.5px}
+  .logo .dot{width:12px;height:12px;border-radius:3px;background:var(--accent);box-shadow:0 0 12px var(--accent)}
+  .tag{font-size:11px;font-weight:600;color:var(--muted);border:1px solid var(--line);padding:2px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:.6px}
+  .spacer{flex:1}
+  .seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px}
+  .seg button{border:0;background:transparent;color:var(--muted);font:inherit;font-weight:600;padding:6px 13px;border-radius:999px;cursor:pointer;font-size:13px}
+  .seg button.on{background:var(--accent);color:var(--accent-ink)}
+  .icobtn{border:1px solid var(--line);background:var(--panel2);color:var(--text);width:38px;height:34px;border-radius:var(--radius-sm);cursor:pointer;font-size:15px}
+
+  /* рабочая зона: рейка режимов слева + основной блок */
+  .workspace{display:flex;gap:16px;align-items:flex-start}
+  @media (max-width:900px){.workspace{flex-direction:column}}
+  .rail{position:sticky;top:16px;width:172px;flex:none;display:flex;flex-direction:column;gap:9px;
+    background:var(--panel2);border:1px solid var(--line);border-top:3px solid var(--accent);border-radius:16px;padding:13px}
+  .rail .rl-hd{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--text);font-weight:800;padding:2px 4px 6px}
+  .rail .rl-hd::before{color:var(--accent)}
+  @media (max-width:900px){.rail{flex-direction:row;width:auto;position:static;overflow-x:auto}.rail .rl-hd{display:none}}
+  .main{flex:1;min-width:0}
+  .mode{position:relative;display:flex;align-items:center;gap:10px;text-align:left;background:var(--panel);
+    border:1px solid var(--line);border-radius:12px;padding:11px;cursor:pointer;transition:.15s;width:100%;min-width:150px}
+  .mode:hover{border-color:color-mix(in srgb,var(--accent) 50%,var(--line))}
+  .mode.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--panel));box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 30%,transparent)}
+  .rnum{width:32px;height:32px;border-radius:9px;background:var(--panel2);border:1px solid var(--line);display:grid;place-items:center;font-weight:800;font-size:15px;color:var(--muted);flex:none}
+  .mode.on .rnum{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+  .mode .mt{font-weight:700;font-size:13px;line-height:1.2;color:var(--text)}
+  .mode .lock{display:block;font-size:10px;color:var(--accent);margin-top:2px;font-weight:700;opacity:.85}
+  .mode.soon{opacity:1}
+  .mode.soon .rnum{opacity:.7}
+
+  /* ДВЕ КОЛОНКИ: слева настройки, справа превью */
+  .grid{display:grid;grid-template-columns:400px minmax(0,1fr);gap:16px;align-items:start}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+
+  /* WIZARD (слева) */
+  .wizard{display:flex;flex-direction:column;gap:10px}
+  .wstep{border:1px solid var(--line);border-radius:14px;background:var(--panel);transition:box-shadow .45s ease,border-color .45s ease,transform .45s cubic-bezier(.16,1,.3,1)}
+  .wstep.active{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent),0 16px 40px rgba(0,0,0,.28)}
+  .wstep.todo{opacity:.5}
+  .whead{display:flex;align-items:center;gap:11px;padding:13px 15px;cursor:pointer}
+  .wnum{width:26px;height:26px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);display:grid;place-items:center;font-weight:800;font-size:12px;color:var(--muted);flex:none}
+  .wstep.active .wnum{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+  .wstep.done .wnum{background:color-mix(in srgb,var(--z-brand) 25%,transparent);color:var(--z-brand);border-color:var(--z-brand)}
+  .wtitle{font-weight:700;font-size:14px;flex:1}.wsub{font-size:11px;color:var(--muted);font-weight:500}
+  .wstate{font-size:11px;color:var(--muted)}.wstep.done .wstate{color:var(--z-brand)}
+  .wbody{max-height:0;opacity:0;overflow:hidden;padding:0 15px;transform:translateY(-10px);
+    transition:max-height .55s cubic-bezier(.16,1,.3,1),opacity .4s ease .05s,transform .55s cubic-bezier(.16,1,.3,1),padding .55s cubic-bezier(.16,1,.3,1)}
+  .wstep.active .wbody{max-height:1000px;opacity:1;transform:translateY(0);padding:2px 15px 15px}
+  .whead{transition:background .3s ease}
+  .wnum{transition:background .4s ease,color .4s ease,border-color .4s ease}
+  .wfoot{display:flex;justify-content:space-between;gap:8px;margin-top:14px}
+  .btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);font:inherit;font-weight:700;padding:9px 15px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px}
+  .btn.ghost{visibility:hidden}.btn.next{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);margin-left:auto}
+  .btn.next:hover{filter:brightness(1.06)}
+
+  /* ПРЕВЬЮ (справа, залипающее) */
+  .preview{position:sticky;top:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+  .pv-hd{font-size:13.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--text);font-weight:800;margin-bottom:12px}
+  .versions{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+  .ver{display:flex;flex-direction:column;gap:8px}
+  .ver .vh{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:800;color:var(--text)}
+  .ver .vh .info{margin-left:auto}
+  .screen{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:linear-gradient(135deg,#2a2f3b,#1a1d25)}
+  .album{width:min(55vw,528px);aspect-ratio:16/9}
+  .tiktok{width:min(26vw,246px);aspect-ratio:9/16}
+  @media (max-width:1080px){.album{width:min(72vw,504px)}.tiktok{width:min(36vw,240px)}}
+  @media (max-width:640px){.album,.tiktok{width:100%}}
+  .frame-note{position:absolute;inset:0;display:grid;place-items:center;color:#cfcae6;font-size:12px;opacity:.7}
+  .zone{position:absolute;border:1.5px solid;border-radius:7px;padding:4px 6px;font-size:10px;font-weight:700}
+  .zone .tit{display:flex;align-items:center;gap:3px;text-shadow:0 1px 2px rgba(0,0,0,.6)}
+  .zone .swatch{width:7px;height:7px;border-radius:2px;flex:none}
+  .h{position:absolute;width:8px;height:8px;background:#fff;border:1.5px solid #111;border-radius:2px}
+  .h.tl{top:-4px;left:-4px}.h.tr{top:-4px;right:-4px}.h.bl{bottom:-4px;left:-4px}.h.br{bottom:-4px;right:-4px}
+  .rot{position:absolute;top:-17px;left:50%;transform:translateX(-50%);width:10px;height:10px;border-radius:50%;background:#fff;border:1.5px solid #111}
+  .rot::after{content:"";position:absolute;top:10px;left:50%;transform:translateX(-50%);width:1.5px;height:8px;background:#fff}
+  .zcam{border-color:var(--z-cam);background:color-mix(in srgb,var(--z-cam) 26%,transparent);color:#fff}
+  .zgame{border-color:var(--z-game);background:color-mix(in srgb,var(--z-game) 22%,transparent);color:#fff}
+  .zsub{border-color:var(--z-sub);background:color-mix(in srgb,var(--z-sub) 24%,transparent);color:#fff;display:flex;align-items:flex-end}
+  .zbrand{border-color:var(--z-brand);background:color-mix(in srgb,var(--z-brand) 26%,transparent);color:#fff}
+  .zplat{border-color:var(--z-plat);background:color-mix(in srgb,var(--z-plat) 30%,transparent);color:#fff}
+  .edit-btn{align-self:flex-start;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:5px 12px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+
+  /* легенда + таймлайн под превью */
+  .legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:7px;margin-top:14px}
+  .leg{display:flex;align-items:flex-start;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px 9px}
+  .leg .sw{width:13px;height:13px;border-radius:4px;flex:none;margin-top:1px}.leg b{font-size:12px}.leg span{display:block;color:var(--muted);font-size:11px}
+  .track{position:relative;display:flex;gap:2px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px;overflow:hidden;margin-top:14px}
+  .thumb{flex:1;aspect-ratio:16/9;border-radius:4px;min-width:0;background:linear-gradient(135deg,#3a4150,#232833)}
+  .thumb:nth-child(2n){background:linear-gradient(135deg,#333a49,#1e222c)}
+  .handle{position:absolute;top:4px;bottom:4px;width:10px;background:var(--accent);border-radius:4px;cursor:ew-resize;box-shadow:0 0 0 2px var(--panel)}
+  .handle.in{left:4px}.handle.out{right:4px}
+  .handle::after{content:"";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:14px;background:var(--accent-ink);border-radius:2px}
+  .playhead{position:absolute;top:0;bottom:0;width:2px;background:#fff;left:46%}
+  .playhead::before{content:"";position:absolute;top:-2px;left:50%;transform:translateX(-50%);width:11px;height:9px;background:#fff;border-radius:2px 2px 4px 4px}
+  .tl-row{display:flex;justify-content:space-between;margin-top:8px;color:var(--muted);font-family:var(--mono);font-size:11px}
+
+  .placeholder{display:none;border:1.5px dashed var(--line);border-radius:var(--radius);background:var(--panel);min-height:320px;padding:26px;text-align:center;color:var(--muted);flex-direction:column;justify-content:center;gap:8px}
+  .placeholder.show{display:flex}.placeholder b{color:var(--text);font-size:15px}
+
+  .field{margin-bottom:12px}.field:last-child{margin-bottom:0}
+  .lab{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-weight:600;font-size:12.5px}
+  .info{width:15px;height:15px;border-radius:50%;border:1px solid var(--line);background:var(--panel2);color:var(--muted);font-size:10px;font-weight:800;display:inline-grid;place-items:center;cursor:help;position:relative;font-style:normal;line-height:1}
+  .info:hover{color:var(--accent);border-color:var(--accent)}
+  .info[data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:135%;right:0;background:#0b0d12;color:#eef;border:1px solid var(--line);padding:7px 10px;border-radius:8px;width:200px;font-size:11.5px;font-weight:500;line-height:1.35;z-index:30;box-shadow:0 8px 24px rgba(0,0,0,.4);text-align:left}
+  select,input[type=text]{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:var(--radius-sm);padding:8px 10px;font:inherit}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:999px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer}
+  .chip.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+  .toggle{display:flex;align-items:center;gap:8px}
+  .sw2{width:38px;height:22px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);position:relative;cursor:pointer;flex:none}
+  .sw2::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted);transition:.15s}
+  .sw2.on{background:color-mix(in srgb,var(--accent) 40%,transparent);border-color:var(--accent)}.sw2.on::after{left:18px;background:var(--accent)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .drop{border:1.5px dashed var(--line);border-radius:10px;padding:14px;text-align:center;color:var(--muted);font-size:12.5px;margin-bottom:10px}
+  .presets{display:flex;gap:8px;flex-wrap:wrap}
+  .preset{cursor:pointer;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:7px;display:flex;flex-direction:column;align-items:center;gap:5px;width:70px}
+  .preset.on{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 35%,transparent)}
+  .mini{width:34px;aspect-ratio:9/16;border-radius:5px;background:#0d0f14;position:relative;overflow:hidden;border:1px solid var(--line)}
+  .mini i{position:absolute;display:block}.preset small{font-size:10px;color:var(--muted);font-weight:600;text-align:center}.preset.on small{color:var(--text)}
+
+  .overlay{position:fixed;inset:0;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(6px);display:none;place-items:center;z-index:50}
+  .overlay.show{display:grid}
+  .loader{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:30px 34px;width:min(360px,90vw);text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+  .clap{width:88px;height:88px;margin:0 auto 18px;position:relative}
+  .clap-b{position:absolute;bottom:0;width:88px;height:58px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#2a9c96)}
+  .clap-t{position:absolute;top:0;left:0;width:88px;height:22px;border-radius:6px;background:#20242e;transform-origin:left center;animation:clap 1s ease-in-out infinite}
+  .clap-t::before{content:"";position:absolute;inset:0;border-radius:6px;background:repeating-linear-gradient(115deg,#fff 0 9px,#20242e 9px 18px);opacity:.9}
+  @keyframes clap{0%,100%{transform:rotate(0)}30%{transform:rotate(-32deg)}60%{transform:rotate(2deg)}}
+  @media (prefers-reduced-motion:reduce){.clap-t{animation:none}}
+  .loader h2{font-size:16px;margin-bottom:4px}.msg{color:var(--muted);font-size:13px;min-height:18px;margin-bottom:16px}
+  .bar{height:8px;border-radius:999px;background:var(--panel2);overflow:hidden;border:1px solid var(--line)}
+  .bar i{display:block;height:100%;width:38%;border-radius:999px;background:linear-gradient(90deg,var(--accent),#7ce0da);animation:fill 4.5s ease-in-out infinite}
+  @keyframes fill{0%{width:6%}50%{width:72%}100%{width:96%}}
+  .pct{margin-top:10px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .close{margin-top:16px;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:8px;padding:6px 12px;font:inherit;cursor:pointer}
+  .foot{color:var(--muted);font-size:11px;text-align:center;padding:2px 0 10px}.foot b{color:var(--text)}
+</style>
+
+<div class="bg"><div class="grid-dots"></div><div class="glow"></div><div class="scan"></div></div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="logo"><span class="dot"></span> Клип-Полировщик</div><span class="tag">прототип</span>
+    <div class="spacer"></div>
+    <div class="seg" id="batch"><button class="on">По одному</button><button>Пачкой</button></div>
+    <button class="icobtn" id="theme" title="Светлая / тёмная тема">◑</button>
+  </div>
+
+  <div class="workspace">
+   <nav class="rail" id="modes">
+     <div class="rl-hd">Режим работы</div>
+     <button class="mode on" data-m="1"><span class="rnum">1</span><span><span class="mt">Twitch-клипы</span></span></button>
+     <button class="mode soon" data-m="2"><span class="rnum">2</span><span><span class="mt">Метки через бота</span><span class="lock">Этап 2 · скоро</span></span></button>
+     <button class="mode soon" data-m="3"><span class="rnum">3</span><span><span class="mt">Автопоиск ИИ</span><span class="lock">Этап 3 · скоро</span></span></button>
+   </nav>
+
+   <div class="main">
+  <div class="grid" id="mode1">
+    <!-- ЛЕВО: настройки (мастер) -->
+    <div class="wizard" id="wizard">
+      <div class="wstep active" data-i="0">
+        <div class="whead"><span class="wnum">1</span><span class="wtitle">Вход <span class="wsub">— выбери клип</span></span><span class="wstate">настройка…</span></div>
+        <div class="wbody"><div class="drop">⬇ Перетащи клип сюда</div>
+          <div class="field"><div class="lab">Или ссылка на Twitch-клип <i class="info" data-tip="Вставь ссылку — приложение само скачает клип.">i</i></div>
+            <input type="text" placeholder="https://clips.twitch.tv/…" value="highlight_krik.mp4"></div>
+          <div class="wfoot"><button class="btn ghost">Назад</button><button class="btn next">Далее →</button></div></div>
+      </div>
+
+      <div class="wstep todo" data-i="1">
+        <div class="whead"><span class="wnum">2</span><span class="wtitle">Раскладка <span class="wsub">— зоны на превью справа</span></span><span class="wstate">ждёт</span></div>
+        <div class="wbody">
+          <div class="field"><div class="lab">Пресеты <i class="info" data-tip="Готовые схемы. Выбери — зоны на превью встанут по местам, дальше подгони мышью.">i</i></div>
+            <div class="presets" id="presets">
+              <div class="preset on" data-p="A"><div class="mini"><i style="left:8%;top:5%;width:84%;height:36%;background:var(--z-cam)"></i><i style="left:8%;top:44%;width:84%;height:50%;background:var(--z-game)"></i></div><small>Вебка сверху</small></div>
+              <div class="preset" data-p="B"><div class="mini"><i style="left:4%;top:4%;width:92%;height:92%;background:var(--z-game)"></i><i style="right:8%;top:7%;width:26%;height:15%;background:var(--z-cam);border-radius:50%"></i></div><small>Кружок</small></div>
+              <div class="preset" data-p="C"><div class="mini"><i style="left:4%;top:4%;width:92%;height:92%;background:var(--z-cam)"></i></div><small>Лицо</small></div>
+              <div class="preset" data-p="D"><div class="mini"><i style="left:8%;top:5%;width:84%;height:50%;background:var(--z-game)"></i><i style="left:8%;top:58%;width:84%;height:37%;background:var(--z-cam)"></i></div><small>Вебка снизу</small></div>
+            </div></div>
+          <div class="field" style="margin-top:12px"><span class="hint" style="color:var(--muted);font-size:11.5px">Тяни цветные зоны прямо на «ТикТок»-превью: перетаскивание — позиция, углы — масштаб, ручка сверху — поворот.</span></div>
+          <div class="wfoot"><button class="btn back">← Назад</button><button class="btn next">Далее →</button></div>
+        </div>
+      </div>
+
+      <div class="wstep todo" data-i="2">
+        <div class="whead"><span class="wnum">3</span><span class="wtitle">Обрезка <span class="wsub">— на таймлайне справа</span></span><span class="wstate">ждёт</span></div>
+        <div class="wbody"><span class="hint" style="color:var(--muted);font-size:11.5px">Тяни ручки начала/конца на дорожке под превью. Пробел — воспроизведение.</span>
+          <div class="wfoot"><button class="btn back">← Назад</button><button class="btn next">Далее →</button></div></div>
+      </div>
+
+      <div class="wstep todo" data-i="3">
+        <div class="whead"><span class="wnum">4</span><span class="wtitle">Субтитры</span><span class="wstate">ждёт</span></div>
+        <div class="wbody">
+          <div class="field"><div class="lab">Шрифт <i class="info" data-tip="Начертание. В наборе — шрифты с русским.">i</i></div><select><option>Montserrat Bold</option><option>Rubik</option><option>Inter</option></select></div>
+          <div class="field"><div class="lab">Анимация <i class="info" data-tip="Пружина, проявление, выезд снизу, караоке.">i</i></div>
+            <div class="chips"><span class="chip on">Pop</span><span class="chip">Fade</span><span class="chip">Slide-up</span><span class="chip">Караоке</span></div></div>
+          <div class="two"><div class="field" style="margin:0"><div class="lab">Обводка <i class="info" data-tip="Контур букв.">i</i></div><input type="range" value="60"></div>
+            <div class="field" style="margin:0"><div class="lab">Фон <i class="info" data-tip="Подложка под текстом.">i</i></div><input type="range" value="35"></div></div>
+          <div class="field" style="margin-top:12px"><div class="toggle"><span class="sw2 on"></span><span>Цензурить мат <i class="info" data-tip="*** в тексте и бип в звуке.">i</i></span></div></div>
+          <div class="wfoot"><button class="btn back">← Назад</button><button class="btn next">Далее →</button></div></div>
+      </div>
+
+      <div class="wstep todo" data-i="4">
+        <div class="whead"><span class="wnum">5</span><span class="wtitle">Брендинг</span><span class="wstate">ждёт</span></div>
+        <div class="wbody">
+          <div class="field"><div class="lab">Ник <i class="info" data-tip="Имя на клипе.">i</i></div><input type="text" value="@nagibator"></div>
+          <div class="field"><div class="lab">Платформа <i class="info" data-tip="Значок площадки.">i</i></div>
+            <div class="chips"><span class="chip on">Twitch</span><span class="chip">YouTube</span><span class="chip">Kick</span><span class="chip">Без значка</span></div></div>
+          <div class="wfoot"><button class="btn back">← Назад</button><button class="btn next">Далее →</button></div></div>
+      </div>
+
+      <div class="wstep todo" data-i="5">
+        <div class="whead"><span class="wnum">6</span><span class="wtitle">Экспорт</span><span class="wstate">ждёт</span></div>
+        <div class="wbody">
+          <div class="two"><div class="field" style="margin:0"><div class="lab">Качество <i class="info" data-tip="1080×1920 — стандарт.">i</i></div><select><option>1080 × 1920</option><option>720 × 1280</option></select></div>
+            <div class="field" style="margin:0"><div class="lab">FPS <i class="info" data-tip="60 — плавнее, тяжелее.">i</i></div><select><option>30</option><option>60</option></select></div></div>
+          <div class="wfoot"><button class="btn back">← Назад</button><button class="btn next" id="renderBtn">Отрендерить клип →</button></div></div>
+      </div>
+    </div>
+
+    <!-- ПРАВО: превью двух версий -->
+    <div class="preview">
+      <div class="pv-hd">Превью — как будет выглядеть клип</div>
+      <div class="versions">
+        <div class="ver">
+          <div class="vh">Альбомная версия <i class="info" data-tip="Горизонтальный 16:9 — исходный кадр стрима.">i</i></div>
+          <div class="screen album">
+            <div class="frame-note">кадр стрима 16:9</div>
+            <div class="zone zcam" style="right:5%;top:7%;left:auto;width:26%;height:34%"><div class="tit"><span class="swatch" style="background:var(--z-cam)"></span>Вебка</div>
+              <span class="h tl"></span><span class="h tr"></span><span class="h bl"></span><span class="h br"></span></div>
+            <div class="zone zgame" style="left:4%;top:8%;width:60%;height:84%"><div class="tit"><span class="swatch" style="background:var(--z-game)"></span>Геймплей</div>
+              <span class="h tl"></span><span class="h tr"></span><span class="h bl"></span><span class="h br"></span></div>
+          </div>
+        </div>
+        <div class="ver">
+          <div class="vh">ТикТок версия <i class="info" data-tip="Вертикальный 9:16 — итоговый клип для TikTok/Shorts.">i</i></div>
+          <div class="screen tiktok" id="tiktok">
+            <div class="frame-note">9:16</div>
+            <div class="zone zcam" id="tCam" style="left:6%;top:5%;width:88%;height:34%"><div class="tit"><span class="swatch" style="background:var(--z-cam)"></span>Вебка</div>
+              <span class="rot"></span><span class="h tl"></span><span class="h tr"></span><span class="h bl"></span><span class="h br"></span></div>
+            <div class="zone zgame" id="tGame" style="left:6%;top:42%;width:88%;height:52%"><div class="tit"><span class="swatch" style="background:var(--z-game)"></span>Гейм</div>
+              <span class="h tl"></span><span class="h tr"></span><span class="h bl"></span><span class="h br"></span></div>
+            <div class="zone zsub" style="left:12%;top:70%;width:76%;height:12%"><div class="tit"><span class="swatch" style="background:var(--z-sub)"></span>Субтитры</div></div>
+            <div class="zone zbrand" style="left:6%;top:5%;width:40%;height:8%"><div class="tit"><span class="swatch" style="background:var(--z-brand)"></span>Ник</div></div>
+            <div class="zone zplat" style="right:6%;top:5%;width:16%;height:8%;left:auto"><div class="tit"><span class="swatch" style="background:var(--z-plat)"></span>▶</div></div>
+          </div>
+          <button class="edit-btn">Изменить кадр</button>
+        </div>
+      </div>
+
+      <div class="legend">
+        <div class="leg"><span class="sw" style="background:var(--z-cam)"></span><div><b>Вебка</b><span>Лицо, не обрезается</span></div></div>
+        <div class="leg"><span class="sw" style="background:var(--z-game)"></span><div><b>Геймплей</b><span>Картинка игры</span></div></div>
+        <div class="leg"><span class="sw" style="background:var(--z-sub)"></span><div><b>Субтитры</b><span>Зона текста</span></div></div>
+        <div class="leg"><span class="sw" style="background:var(--z-brand)"></span><div><b>Ник</b><span>Имя на клипе</span></div></div>
+        <div class="leg"><span class="sw" style="background:var(--z-plat)"></span><div><b>Платформа</b><span>Значок площадки</span></div></div>
+      </div>
+
+      <div class="track">
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb"></div><div class="thumb"></div>
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb"></div><div class="thumb"></div>
+        <div class="thumb"></div><div class="thumb"></div>
+        <div class="handle in"></div><div class="handle out"></div><div class="playhead"></div>
+      </div>
+      <div class="tl-row"><span style="color:var(--z-sub)">● отрезок 00:12 → 00:41</span><span>длит. 00:29 · весь клип 01:04</span></div>
+    </div>
+  </div>
+
+  <div class="placeholder" id="ph2"><b>Этап 2 · Метки через бота</b><div>Каркас режима готов — внутрянка появится на Этапе 2.<br>Стример будет ставить метки командой в чате.</div></div>
+  <div class="placeholder" id="ph3"><b>Этап 3 · Автопоиск ИИ</b><div>Каркас режима готов — внутрянка появится на Этапе 3.<br>ИИ сам найдёт лучшие моменты по чату, звуку и речи.</div></div>
+   </div>
+  </div>
+
+  <div class="foot">Функциональный <b>прототип</b> (Пасс 1). Финальный визуал и анимации — Пасс 2, после художника.</div>
+</div>
+
+<div class="overlay" id="ov">
+  <div class="loader">
+    <div class="clap"><div class="clap-b"></div><div class="clap-t"></div></div>
+    <h2>Рендерю клип…</h2><div class="msg" id="msg">Ищу, где ты орал громче всех…</div>
+    <div class="bar"><i></i></div><div class="pct" id="pct">47%</div>
+    <button class="close" onclick="document.getElementById('ov').classList.remove('show')">свернуть демо</button>
+  </div>
+</div>
+
+<script>
+  const root=document.documentElement;
+  document.getElementById('theme').onclick=()=>{const c=root.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');root.setAttribute('data-theme',c==='dark'?'light':'dark')};
+  document.querySelectorAll('#batch button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#batch button').forEach(x=>x.classList.remove('on'));b.classList.add('on')});
+  document.querySelectorAll('.chips').forEach(r=>r.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{r.querySelectorAll('.chip').forEach(x=>x.classList.remove('on'));c.classList.add('on')}));
+  document.querySelectorAll('.sw2').forEach(s=>s.onclick=()=>s.classList.toggle('on'));
+
+  const g1=document.getElementById('mode1'),ph2=document.getElementById('ph2'),ph3=document.getElementById('ph3');
+  document.querySelectorAll('.mode').forEach(m=>m.onclick=()=>{
+    document.querySelectorAll('.mode').forEach(x=>x.classList.remove('on'));m.classList.add('on');
+    const id=m.dataset.m;g1.style.display=id==='1'?'grid':'none';
+    if(id==='1'){g1.style.animation='none';void g1.offsetWidth;g1.style.animation='fadeUp .45s cubic-bezier(.16,1,.3,1)';}
+    ph2.classList.toggle('show',id==='2');ph3.classList.toggle('show',id==='3')});
+
+  const steps=[...document.querySelectorAll('.wstep')];let cur=0;
+  const glowEl=document.querySelector('.bg .glow');
+  let curC=[124,92,255], tgtC=[124,92,255];
+  function tintGlow(el){
+    if(!el) return;
+    const hex=getComputedStyle(el).getPropertyValue('--sc').trim();
+    const m=hex.match(/^#([0-9a-fA-F]{6})$/); if(!m) return;
+    const n=parseInt(m[1],16); tgtC=[(n>>16)&255,(n>>8)&255,n&255];
+  }
+  (function colorLoop(){ // плавно тянем цвет сферы к цвету активного окна
+    if(glowEl){
+      for(let i=0;i<3;i++) curC[i]+=(tgtC[i]-curC[i])*0.06;
+      glowEl.style.setProperty('--glow','rgba('+Math.round(curC[0])+','+Math.round(curC[1])+','+Math.round(curC[2])+',.34)');
+    }
+    requestAnimationFrame(colorLoop);
+  })();
+  function setStep(n){cur=Math.max(0,Math.min(steps.length-1,n));
+    steps.forEach((s,i)=>{s.classList.toggle('active',i===cur);s.classList.toggle('done',i<cur);s.classList.toggle('todo',i>cur);
+      s.querySelector('.wstate').textContent=i<cur?'✓ готово':i===cur?'настройка…':'ждёт'});
+    tintGlow(steps[cur]);
+    steps[cur].scrollIntoView({behavior:'smooth',block:'nearest'})}
+  tintGlow(steps[0]);
+  steps.forEach((s,i)=>{
+    s.querySelector('.whead').onclick=()=>{if(i<=cur)setStep(i)};
+    s.querySelector('.next')?.addEventListener('click',()=>{i===steps.length-1?document.getElementById('ov').classList.add('show'):setStep(i+1)});
+    s.querySelector('.back')?.addEventListener('click',()=>setStep(i-1))});
+
+  const layouts={
+    A:{cam:'left:6%;top:5%;width:88%;height:34%',game:'left:6%;top:42%;width:88%;height:52%'},
+    B:{cam:'right:7%;top:6%;left:auto;width:30%;height:16%;border-radius:50%',game:'left:4%;top:4%;width:92%;height:92%'},
+    C:{cam:'left:4%;top:4%;width:92%;height:92%',game:'left:50%;top:50%;width:0;height:0;opacity:0'},
+    D:{cam:'left:6%;top:58%;width:88%;height:37%',game:'left:6%;top:5%;width:88%;height:50%'}};
+  const tCam=document.getElementById('tCam'),tGame=document.getElementById('tGame');
+  document.querySelectorAll('.preset').forEach(p=>p.onclick=()=>{
+    document.querySelectorAll('.preset').forEach(x=>x.classList.remove('on'));p.classList.add('on');
+    const L=layouts[p.dataset.p];
+    tCam.style.cssText='position:absolute;border:1.5px solid;border-radius:7px;padding:3px 5px;'+L.cam;
+    tGame.style.cssText='position:absolute;border:1.5px solid;border-radius:7px;padding:3px 5px;'+L.game});
+
+  const msgs=["Ищу, где ты орал громче всех…","Пикаю маты, чтобы ютуб не плакал…","Вырезаю вайбовые моменты…","Прибиваю субтитры гвоздями…","Полирую до блеска ✨","Кормлю видеокарту…"];
+  let mi=0,pp=12;setInterval(()=>{if(!document.getElementById('ov').classList.contains('show'))return;
+    mi=(mi+1)%msgs.length;document.getElementById('msg').textContent=msgs[mi];
+    pp=pp>=96?12:pp+Math.floor(Math.random()*16+6);document.getElementById('pct').textContent=pp+'%'},900);
+</script>
+
+<script>
+// Сфера гуляет ТОЛЬКО по свободным боковым полям (не залезает под интерфейс):
+// плавно летит вертикально по гуттеру, уходит за край — появляется с рандомной стороны
+(function(){
+  const el=document.querySelector('.bg .glow');
+  const app=document.querySelector('.app');
+  if(!el||!app) return;
+  const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
+  const SPEED=110;      // px/сек — средняя скорость
+  const GUTTER_MIN=90;  // минимальная ширина свободного поля
+  let vw=innerWidth,vh=innerHeight,x=0,y=0,vy=0,margin=0;
+  function spawn(){
+    vw=innerWidth; vh=innerHeight;
+    const r=app.getBoundingClientRect();
+    const gutters=[];
+    if(r.left>GUTTER_MIN) gutters.push(r.left*0.5);            // центр левого поля
+    if(vw-r.right>GUTTER_MIN) gutters.push((r.right+vw)*0.5);  // центр правого поля
+    // ширина свободного поля → адаптивный размер сферы, чтобы не залезать под панели
+    const gW=Math.max(GUTTER_MIN, Math.min(r.left, vw-r.right));
+    const size=Math.max(200,Math.min(gW*1.9,520));
+    el.style.width=size+'px';
+    margin=size/2+40;
+    x = gutters.length ? gutters[Math.floor(Math.random()*gutters.length)]
+                       : (Math.random()<.5 ? r.left*0.5 : (r.right+vw)*0.5);
+    if(Math.random()<.5){y=-margin; vy=SPEED;}   // входит сверху, идёт вниз
+    else {y=vh+margin; vy=-SPEED;}               // входит снизу, идёт вверх
+  }
+  function place(){el.style.transform='translate('+x+'px,'+y+'px) translate(-50%,-50%)';}
+  let last=performance.now();
+  function tick(now){
+    const dt=Math.min((now-last)/1000,.05); last=now; // clamp — без рывков
+    y+=vy*dt;
+    if(y<-margin||y>vh+margin) spawn();
+    place();
+    requestAnimationFrame(tick);
+  }
+  spawn();
+  if(reduce){place();}
+  else requestAnimationFrame(tick);
+})();
+</script>
