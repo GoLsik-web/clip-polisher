@@ -63,6 +63,8 @@ class MainWindow(QMainWindow):
         self._batch_sources: list[str] = []
         self._provisioning = False        # идёт докачка первого запуска
         self._provisioned_checked = False
+        self._update_info = None          # {version,url,size} если доступно обновление
+        self._updating = False
 
         self._build()
         self._apply_theme()
@@ -120,8 +122,18 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.burger)
         self.mode_label = QLabel("Twitch-клипы"); self.mode_label.setObjectName("logo")
         logo = QLabel("КЛИП-ПОЛИРОВЩИК"); logo.setObjectName("logo")
-        tag = QLabel("прототип"); tag.setObjectName("tag")
+        from core.version import __version__
+        tag = QLabel(f"v{__version__}"); tag.setObjectName("tag")
         lay.addWidget(logo); lay.addWidget(self.mode_label); lay.addWidget(tag); lay.addStretch(1)
+        # Кнопка обновления — скрыта, всплывает если на GitHub есть версия новее.
+        self.update_btn = QPushButton("Обновить")
+        self.update_btn.setToolTip("Доступна новая версия — скачать и установить")
+        self.update_btn.setStyleSheet(
+            "background:#37c9c2;border:none;border-radius:8px;color:#06231f;"
+            "padding:7px 13px;font-weight:800;")
+        self.update_btn.clicked.connect(self._do_update)
+        self.update_btn.hide()
+        lay.addWidget(self.update_btn)
         # По одному / Пачкой
         self.batch_single = QPushButton("По одному"); self.batch_single.setCheckable(True)
         self.batch_single.setChecked(True)
@@ -672,6 +684,7 @@ class MainWindow(QMainWindow):
             self._provisioned_checked = True
             from PySide6.QtCore import QTimer
             QTimer.singleShot(250, self._check_first_run)
+            QTimer.singleShot(1500, self._check_update)   # тихая проверка обновления
 
     def _check_first_run(self) -> None:
         if os.environ.get("CLIP_SKIP_PROVISION"):
@@ -712,6 +725,67 @@ class MainWindow(QMainWindow):
             "Не получилось скачать модель/библиотеки:\n\n" + str(msg)[:800] +
             "\n\nПроверь интернет и перезапусти приложение. Без модели "
             "распознавание речи не заработает.")
+
+    # ======================================================================
+    # Встроенное обновление
+    # ======================================================================
+
+    def _check_update(self) -> None:
+        if os.environ.get("CLIP_SKIP_UPDATE"):
+            return
+        t = self._track(W.UpdateCheckThread())
+        t.found.connect(self._update_found)
+        t.start()
+
+    def _update_found(self, info: dict) -> None:
+        self._update_info = info
+        self.update_btn.setText(f"Обновить до v{info.get('version','?')}")
+        self.update_btn.show()
+
+    def _do_update(self) -> None:
+        if not self._update_info or self._updating:
+            return
+        ver = self._update_info.get("version", "?")
+        size = self._update_info.get("size", 0)
+        mb = f" (~{size // (1<<20)} МБ)" if size else ""
+        ok = QMessageBox.question(
+            self, "Обновление",
+            f"Доступна версия v{ver}{mb}.\n\nСкачать и установить сейчас? "
+            "Приложение закроется, установит обновление поверх и запустится снова.\n\n"
+            "Скачивать заново с сайта не нужно.",
+            QMessageBox.Yes | QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        self._updating = True
+        dst = os.path.join(tempfile.gettempdir(), f"ClipPolisher-Setup-{ver}.exe")
+        self.loader.start()
+        self.loader.title.setText("Обновление")
+        self.loader.msg.setText("Скачиваю новую версию…")
+        t = self._track(W.UpdateDownloadThread(self._update_info["url"], dst))
+        t.progress.connect(self._provision_progress)   # тот же плавный бар
+        t.finished_ok.connect(self._update_ready)
+        t.failed.connect(self._update_fail)
+        t.start()
+
+    def _update_ready(self, path: str) -> None:
+        from PySide6.QtWidgets import QApplication
+        self.loader.stop()
+        try:
+            from core import updater
+            updater.launch_installer(path)
+        except Exception as e:  # noqa: BLE001
+            self._updating = False
+            QMessageBox.warning(self, "Не удалось запустить установщик", str(e)[:600])
+            return
+        # Закрываемся, чтобы установщик заменил файлы (в .iss CloseApplications=yes).
+        QApplication.quit()
+
+    def _update_fail(self, msg: str) -> None:
+        self._updating = False
+        self.loader.stop()
+        QMessageBox.warning(self, "Обновление не удалось",
+                            "Не получилось скачать обновление:\n\n" + str(msg)[:600] +
+                            "\n\nПопробуй позже или скачай вручную со страницы релизов.")
 
     def _render_done(self, path: str) -> None:
         from PySide6.QtCore import QTimer
