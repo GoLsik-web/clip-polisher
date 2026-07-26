@@ -3,7 +3,7 @@
 ; Модель Whisper и CUDA-библиотеки НЕ входят — докачиваются при первом запуске.
 
 #define MyAppName "Полировщик клипов"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.7"
 #define MyAppPublisher "GoLsik"
 #define MyAppExeName "ClipPolisher.exe"
 

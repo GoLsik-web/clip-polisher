@@ -17,21 +17,25 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox,
     QDoubleSpinBox, QSlider, QFileDialog, QHBoxLayout, QVBoxLayout, QStackedLayout,
     QFrame, QButtonGroup, QMessageBox, QSizePolicy, QScrollArea, QBoxLayout,
+    QInputDialog,
 )
 
 from core.config import (LayoutConfig, LayoutPreset, ExportConfig, VideoCodec,
-                         Corner, Segment)
+                         Corner, Segment, Composition)
 from core.captions import CaptionStyle, CaptionAnimation
 from core.branding import BrandingConfig, Platform
 from core.pipeline import PipelineConfig
+from core import profiles as profiles_mod
 from core import ffmpeg_utils as ff
 from core.layout import load_preset
 
 from .theme import build_qss, PALETTE, STEP_COLORS
 from .background import AnimatedBackground
 from .wizard import Wizard
-from .widgets import HelpIcon, ChipRow, ToggleSwitch
+from .widgets import HelpIcon, ChipRow, ToggleSwitch, VersionPill
 from .preview_panel import EditorPanel
+from .clip_strip import ClipStrip, ClipItem
+from .marks_mode import MarksModePanel
 from .mode_menu import ModeMenuOverlay
 from .loader import LoaderOverlay
 from . import worker as W
@@ -48,7 +52,8 @@ PLATFORM_MAP = {"Twitch": "twitch", "YouTube": "youtube", "Kick": "kick", "Бе�
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Клип-Полировщик — Этап 1")
+        self.setWindowTitle("Клип-Полировщик — Twitch-клипы")
+        self._set_window_icon()
         self.setMinimumSize(880, 580)   # ниже — появляется скролл, а не обрезка
         self._settings = QSettings("ClipPolisher", "Stage1")
         self._theme = self._settings.value("theme", "dark")
@@ -59,8 +64,11 @@ class MainWindow(QMainWindow):
         self._preview_running = False
         self._preview_pending = False
         self._syncing = False   # защита от рекурсии таймлайн↔числовые поля
-        self._batch = False               # режим «Пачкой»
+        self._batch = False               # режим «Несколько клипов» (мульти-редактор)
         self._batch_sources: list[str] = []
+        self._clips: list[ClipItem] = []  # клипы мульти-редактора
+        self._active_clip = -1            # индекс активного клипа в редакторе
+        self._rendering = False           # идёт очередь мульти-рендера (блок редактирования)
         self._provisioning = False        # идёт докачка первого запуска
         self._provisioned_checked = False
         self._update_info = None          # инфо релиза, если он НОВЕЕ (иначе None)
@@ -72,6 +80,78 @@ class MainWindow(QMainWindow):
         self._build()
         self._apply_theme()
         self._restore_geometry()
+        self._build_tray()
+
+    # ======================================================================
+    # Трей (нужен автопилоту бота: программа должна работать, но не мешать)
+    # ======================================================================
+
+    def _build_tray(self) -> None:
+        from PySide6.QtGui import QAction, QGuiApplication, QIcon
+        from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+        from core.resources import res
+
+        self._tray = None
+        # На безголовых платформах (офскрин-снимки, тесты) трея нет — попытка его
+        # создать роняет процесс при выходе.
+        if QGuiApplication.platformName() in ("offscreen", "minimal", "vnc"):
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon = QIcon(res("assets/app.ico"))
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("Полировщик клипов")
+        menu = QMenu(self)
+        act_open = QAction("Открыть", self); act_open.triggered.connect(self._show_from_tray)
+        act_quit = QAction("Выход", self); act_quit.triggered.connect(self._quit_from_tray)
+        menu.addAction(act_open); menu.addSeparator(); menu.addAction(act_quit)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(
+            lambda reason: self._show_from_tray()
+            if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+        self._tray.show()
+
+    def _should_hide_instead_of_close(self) -> bool:
+        if not getattr(self, "_tray", None):
+            return False
+        if not QSettings("ClipPolisher", "Bot").value("tray_on_close", True, bool):
+            return False
+        try:
+            return self.marks_panel.bot_panel.bot_running
+        except AttributeError:
+            return False
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self._force_quit = True
+        self.close()
+
+    def hide_to_tray(self, message: bool = True) -> None:
+        """Свернуть в трей (бот при этом продолжает работать)."""
+        if not getattr(self, "_tray", None):
+            self.showMinimized()
+            return
+        self.hide()
+        if message and not self._settings.value("tray_notified", False, bool):
+            self._tray.showMessage("Полировщик клипов работает",
+                                   "Бот продолжает ловить метки. Открыть — двойной клик "
+                                   "по значку у часов.", self.windowIcon(), 6000)
+            self._settings.setValue("tray_notified", True)
+
+    def _set_window_icon(self) -> None:
+        """Брендовый бургер в заголовке/таскбаре (иначе — дефолтная иконка Qt/винды)."""
+        try:
+            from PySide6.QtGui import QIcon
+            from core.resources import res
+            path = res("assets/app.ico")
+            if os.path.isfile(path):
+                self.setWindowIcon(QIcon(path))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ======================================================================
     # Сборка
@@ -94,7 +174,7 @@ class MainWindow(QMainWindow):
         inner.setContentsMargins(16, 16, 16, 16)
         inner.setSpacing(14)
         inner.addWidget(self._topbar())
-        inner.addWidget(self._workspace(), 1)
+        inner.addWidget(self._build_mode_stack(), 1)
 
         # Прозрачный скролл — появляется, когда места не хватает (а не обрезка).
         self._scroll = QScrollArea()
@@ -126,19 +206,19 @@ class MainWindow(QMainWindow):
         self.mode_label = QLabel("Twitch-клипы"); self.mode_label.setObjectName("logo")
         logo = QLabel("КЛИП-ПОЛИРОВЩИК"); logo.setObjectName("logo")
         from core.version import __version__
-        tag = QLabel(f"v{__version__}"); tag.setObjectName("tag")
-        lay.addWidget(logo); lay.addWidget(self.mode_label); lay.addWidget(tag); lay.addStretch(1)
-        # Кнопка «Обновления» — ВСЕГДА видна. Тихая, когда версия актуальна;
-        # «загорается», когда доступно обновление. Открывает меню обновлений.
-        self.updates_btn = QPushButton("Обновления")
-        self.updates_btn.setToolTip("Проверить и установить обновления")
-        self.updates_btn.clicked.connect(self._open_updates)
-        self._style_updates_btn(has_update=False)
-        lay.addWidget(self.updates_btn)
-        # По одному / Пачкой
-        self.batch_single = QPushButton("По одному"); self.batch_single.setCheckable(True)
+        # Пилюля версии со статус-точкой (техничный build-индикатор) рядом с логотипом.
+        # Она же — вход в меню обновлений (точка «загорается» бирюзовым при обнове).
+        self.version_pill = VersionPill(__version__)
+        self.version_pill.clicked.connect(self._open_updates)
+        lay.addWidget(logo); lay.addWidget(self.mode_label)
+        lay.addWidget(self.version_pill); lay.addStretch(1)
+        # Один клип / Несколько клипов (мульти-редактор)
+        self.batch_single = QPushButton("Один клип"); self.batch_single.setCheckable(True)
         self.batch_single.setChecked(True)
-        self.batch_many = QPushButton("Пачкой"); self.batch_many.setCheckable(True)
+        self.batch_single.setToolTip("Обычный режим: один клип за раз")
+        self.batch_many = QPushButton("Несколько"); self.batch_many.setCheckable(True)
+        self.batch_many.setToolTip("Мульти-редактор: список клипов, у каждого свои "
+                                   "зоны/обрезка/ник, обработка очередью")
         grp = QButtonGroup(self); grp.setExclusive(True)
         grp.addButton(self.batch_single); grp.addButton(self.batch_many)
         self.batch_single.clicked.connect(lambda: self._set_batch_mode(False))
@@ -150,6 +230,37 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.theme_btn)
         return bar
 
+    def _build_mode_stack(self) -> QWidget:
+        """Стек экранов по режимам бургер-меню (изоляция Этапа 2 от рабочего Этапа 1).
+
+        Страница 0 — Twitch-клипы (мастер|редактор), 1 — «Метки через бота» (склейка),
+        2 — заглушка Автопоиск ИИ. Переключается из _on_mode_selected."""
+        from PySide6.QtWidgets import QStackedWidget
+        self._mode_stack = QStackedWidget()
+        self._mode_stack.addWidget(self._workspace())          # стр. 0
+        self.marks_panel = MarksModePanel(self._theme)         # стр. 1
+        self.marks_panel.render_requested.connect(self._render_marks)
+        self._mode_stack.addWidget(self.marks_panel)
+        self._mode_stack.addWidget(self._mode3_placeholder())  # стр. 2
+        return self._mode_stack
+
+    def _mode3_placeholder(self) -> QWidget:
+        from .theme import PALETTE
+        c = PALETTE[self._theme]
+        wrap = QWidget(); wl = QVBoxLayout(wrap); wl.addStretch(1)
+        card = QFrame(); card.setObjectName("card")
+        card.setMaximumWidth(520)
+        cl = QVBoxLayout(card); cl.setContentsMargins(28, 24, 28, 24); cl.setSpacing(8)
+        t = QLabel("Этап 3 · Автопоиск ИИ")
+        t.setStyleSheet("font-weight:800;font-size:18px;")
+        d = QLabel("Каркас режима готов. ИИ будет сам находить лучшие моменты по чату, "
+                   "звуку и речи — появится на Этапе 3.")
+        d.setWordWrap(True); d.setStyleSheet(f"color:{c['muted']};font-size:13px;")
+        cl.addWidget(t); cl.addWidget(d)
+        row = QHBoxLayout(); row.addStretch(1); row.addWidget(card); row.addStretch(1)
+        wl.addLayout(row); wl.addStretch(1)
+        return wrap
+
     def _workspace(self) -> QWidget:
         """Две колонки ФИКС-пропорции 35/65 (без дивайдера): мастер | редактор.
 
@@ -160,21 +271,32 @@ class MainWindow(QMainWindow):
         self._ws_layout.setContentsMargins(0, 0, 0, 0)
         self._ws_layout.setSpacing(14)
 
-        # Мастер (настройки, 35%).
+        # Мастер (настройки, 35%): сверху — бар профиля стримера, ниже — сам мастер.
+        master = QWidget()
+        mcol = QVBoxLayout(master); mcol.setContentsMargins(0, 0, 0, 0); mcol.setSpacing(10)
+        mcol.addWidget(self._profile_bar())
         self.wizard = self._build_wizard()
-        self.wizard.setMinimumWidth(300)
         self.wizard.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._ws_layout.addWidget(self.wizard, 35)
+        mcol.addWidget(self.wizard, 1)
+        master.setMinimumWidth(300)
+        master.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._ws_layout.addWidget(master, 35)
 
-        # Редактор (65%) — прижат к верху, снизу фон.
+        # Редактор (65%): [лента клипов | сам редактор]. Лента видна в мульти-режиме.
         self._ed_wrap = QWidget()
-        ew = QVBoxLayout(self._ed_wrap); ew.setContentsMargins(0, 0, 0, 0); ew.setSpacing(0)
+        ew = QHBoxLayout(self._ed_wrap); ew.setContentsMargins(0, 0, 0, 0); ew.setSpacing(12)
+        self.clip_strip = ClipStrip()
+        self.clip_strip.add_requested.connect(self._add_clips)
+        self.clip_strip.selected.connect(self._select_clip)
+        self.clip_strip.removed.connect(self._remove_clip)
+        self.clip_strip.setVisible(False)
+        ew.addWidget(self.clip_strip)
         self.editor = EditorPanel()
         self.editor.change_frame.connect(self._grab_frames)
         self.editor.composition_changed.connect(self._refresh_result)
         self.editor.trim_changed.connect(self._on_trim_drag)
         self.editor.trim_scrub.connect(lambda _p: self._grab_frames())
-        ew.addWidget(self.editor)   # редактор заполняет высоту (холст вписывается)
+        ew.addWidget(self.editor, 1)   # редактор заполняет высоту (холст вписывается)
         self._ed_wrap.setMinimumWidth(340)
         self._ws_layout.addWidget(self._ed_wrap, 65)
         return w
@@ -284,6 +406,12 @@ class MainWindow(QMainWindow):
         col2.addWidget(self.box_slider)
         two.addLayout(col1); two.addLayout(col2)
         b.addLayout(two)
+        # Яркая подсветка ключевых слов (MrBeast-стиль). По умолчанию — выкл.
+        b.addWidget(self._lab("Подсветка ключевых слов", "Само выделяет «ударные» слова "
+                              "ярко (как у MrBeast). «Плашка» — слово в жёлтой заливке; "
+                              "«Цвет» — ярким цветом с обводкой; «Выкл» — обычные субтитры."))
+        self.hl_chips = ChipRow(["Выкл", "Плашка", "Цвет"])
+        b.addWidget(self.hl_chips)
         # Цензура мата: способ. По умолчанию «Не трогать».
         b.addWidget(self._lab("Цензура мата", "Как поступать с матом: не трогать, "
                               "заменить бипом (тон) или заглушить тишиной. В тексте — ***."))
@@ -371,18 +499,132 @@ class MainWindow(QMainWindow):
         return (name or "clip_vertical") + ".mp4"
 
     # ======================================================================
+    # Профиль стримера (зоны/ник/платформа/safe-зоны) — %APPDATA%\ClipPolisher
+    # ======================================================================
+
+    def _profile_bar(self) -> QWidget:
+        bar = QFrame(); bar.setObjectName("panel2")
+        lay = QHBoxLayout(bar); lay.setContentsMargins(10, 8, 10, 8); lay.setSpacing(8)
+        lab = QLabel("Профиль:"); lab.setProperty("class", "lab")
+        lay.addWidget(lab)
+        self.profile_combo = QComboBox()
+        self.profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        lay.addWidget(self.profile_combo, 1)
+        self.profile_save_btn = QPushButton("Сохранить…")
+        self.profile_save_btn.setToolTip("Сохранить текущие зоны, ник и платформу как профиль стримера")
+        self.profile_save_btn.clicked.connect(self._save_profile)
+        self.profile_del_btn = QPushButton("Удалить")
+        self.profile_del_btn.clicked.connect(self._delete_profile)
+        lay.addWidget(self.profile_save_btn); lay.addWidget(self.profile_del_btn)
+        lay.addWidget(HelpIcon("Сохрани разметку под конкретного стримера — зоны камеры/"
+                               "геймплея, ник, платформу и safe-зоны. Потом выбери его из "
+                               "списка — всё подтянется. Хранится локально у тебя."))
+        self._refresh_profiles(select="— без профиля")
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        return bar
+
+    def _refresh_profiles(self, select: Optional[str] = None) -> None:
+        combo = self.profile_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— без профиля")
+        for name in profiles_mod.names():
+            combo.addItem(name)
+        if select is not None:
+            i = combo.findText(select)
+            combo.setCurrentIndex(max(0, i))
+        combo.blockSignals(False)
+        self.profile_del_btn.setEnabled(combo.currentIndex() > 0)
+
+    def _on_profile_selected(self, idx: int) -> None:
+        self.profile_del_btn.setEnabled(idx > 0)
+        if idx <= 0:
+            return
+        data = profiles_mod.get(self.profile_combo.currentText())
+        if data:
+            self._apply_profile(data)
+
+    def _collect_profile(self) -> dict:
+        return {
+            "nickname": self.nick_edit.text().strip(),
+            "platform": PLATFORM_MAP[self.platform_chips.current()],
+            "composition": self.editor.get_composition().to_dict(),
+            "safezone": self.editor.get_safezone_key(),
+        }
+
+    def _apply_profile(self, data: dict) -> None:
+        self.nick_edit.setText(data.get("nickname", "") or "")
+        rev = {v: k for k, v in PLATFORM_MAP.items()}
+        self.platform_chips.set_current(rev.get(data.get("platform", "none"), "Без значка"))
+        comp = data.get("composition")
+        if comp:
+            try:
+                self.editor.set_composition(Composition.from_dict(comp))
+            except Exception:  # noqa: BLE001 — битый профиль не должен ронять UI
+                pass
+        self.editor.set_safezone(data.get("safezone"))
+        self._refresh_result()
+
+    def _save_profile(self) -> None:
+        cur = self.profile_combo.currentText()
+        default = "" if cur.startswith("—") else cur
+        name, ok = QInputDialog.getText(self, "Сохранить профиль стримера",
+                                        "Имя профиля (например, ник стримера):", text=default)
+        if not ok or not name.strip():
+            return
+        try:
+            profiles_mod.save(name.strip(), self._collect_profile())
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Не удалось сохранить", str(e))
+            return
+        self._refresh_profiles(select=name.strip())
+
+    def _delete_profile(self) -> None:
+        if self.profile_combo.currentIndex() <= 0:
+            return
+        name = self.profile_combo.currentText()
+        if QMessageBox.question(self, "Удалить профиль",
+                                f"Удалить профиль «{name}»?") != QMessageBox.Yes:
+            return
+        profiles_mod.delete(name)
+        self._refresh_profiles(select="— без профиля")
+
+    # ======================================================================
     # Тема / фон
     # ======================================================================
 
     def _apply_theme(self) -> None:
+        from . import theme as theme_mod
+        theme_mod.set_current(self._theme)      # виджеты, которые рисуют себя сами
         self.setStyleSheet(build_qss(self._theme))
         pal = PALETTE[self._theme]
+        # Тумблеры и чипы рисуются вручную — им нужно сказать перекраситься.
+        from .widgets import Chip, ToggleSwitch
+        for cls in (Chip, ToggleSwitch):
+            for w in self.findChildren(cls):
+                w.set_theme(self._theme)
         dot = pal["dot"]
         # rgba строку → кортеж
         import re
         m = re.findall(r"[\d.]+", dot)
         rgba = (int(float(m[0])), int(float(m[1])), int(float(m[2])), int(float(m[3]) * 255))
         self.bg.set_palette(pal["bg"], rgba)
+        # Пилюля версии — цвета под тему (панель/линия/текст).
+        if hasattr(self, "version_pill"):
+            self.version_pill.set_palette(pal["text"], pal["muted"], pal["line"], pal["panel2"])
+        # Лента клипов мульти-редактора — цвета под тему.
+        if hasattr(self, "clip_strip"):
+            self.clip_strip.set_palette(pal)
+        # Редактор — подписи/легенда под тему (холст-превью остаётся тёмным).
+        if hasattr(self, "editor"):
+            self.editor.set_theme(self._theme)
+        # Панель Этапа 2 (метки) — тема таймлайна/перерисовка.
+        if hasattr(self, "marks_panel"):
+            self.marks_panel.apply_theme(self._theme)
+        # Если открыто окно обновлений — перекрасить и его под новую тему.
+        dlg = getattr(self, "_updates_dialog", None)
+        if dlg is not None:
+            dlg.apply_theme(self._theme)
 
     def _toggle_theme(self) -> None:
         self._theme = "light" if self._theme == "dark" else "dark"
@@ -403,9 +645,64 @@ class MainWindow(QMainWindow):
     def _on_mode_selected(self, idx: int) -> None:
         names = ["Twitch-клипы", "Метки через бота", "Автопоиск ИИ"]
         self.mode_label.setText(names[idx])
-        if idx != 0:
-            QMessageBox.information(self, "Скоро",
-                                    f"Режим {idx+1} — каркас готов, внутрянка на Этапе {idx+1}.")
+        # Заголовок окна тоже под режим — раньше там всегда висел «Этап 1».
+        self.setWindowTitle(f"Клип-Полировщик — {names[idx]}")
+        self._mode_stack.setCurrentIndex(idx)
+        # Режим «Один клип / Несколько» относится только к Этапу 1.
+        mode1 = (idx == 0)
+        self.batch_single.setVisible(mode1)
+        self.batch_many.setVisible(mode1)
+
+    def _render_marks(self) -> None:
+        """Этап 2: нарезать клипы из моментов. Раздельно — очередь (каждый в свой файл),
+        либо один клип-склейка. Раскладка/звук — общие (из встроенного редактора)."""
+        if not self._ready_to_render():
+            return
+        err = self.marks_panel.validate()
+        if err:
+            QMessageBox.warning(self, "Нельзя нарезать", err)
+            return
+        try:
+            pcfgs = self.marks_panel.build_pipeline_configs(self._out_dir)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.critical(self, "Ошибка конфигурации", str(ex))
+            return
+        if not pcfgs:
+            QMessageBox.warning(self, "Нечего рендерить", "Не набралось ни одного клипа.")
+            return
+        self.loader.start()
+        if len(pcfgs) == 1:
+            t = self._track(W.RenderThread(pcfgs[0]))
+            t.progress.connect(self.loader.set_progress)
+            t.finished_ok.connect(self._render_done)
+            t.failed.connect(self._render_fail)
+        else:
+            t = self._track(W.BatchRenderThread(pcfgs))
+            t.progress.connect(self.loader.set_progress)
+            t.finished_ok.connect(self._marks_batch_done)
+            t.failed.connect(self._render_fail)
+        t.start()
+
+    def _marks_batch_done(self, paths: list) -> None:
+        """Готова очередь раздельных клипов Этапа 2 — сообщить и предложить открыть папку."""
+        from PySide6.QtCore import QTimer
+        self.loader.finish()
+        QTimer.singleShot(280, self.loader.stop)
+        n = len(paths)
+        folder = os.path.dirname(paths[0]) if paths else self._out_dir
+        QTimer.singleShot(300, lambda: self._show_batch_done(n, folder))
+
+    def _show_batch_done(self, n: int, folder: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Готово")
+        box.setText(f"Нарезано клипов: {n}\nПапка: {folder}")
+        open_btn = box.addButton("Открыть папку", QMessageBox.ActionRole)
+        box.addButton("ОК", QMessageBox.AcceptRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            import subprocess
+            subprocess.Popen(["explorer", os.path.normpath(folder)])
 
     # ======================================================================
     # Логика (через core + потоки)
@@ -413,14 +710,7 @@ class MainWindow(QMainWindow):
 
     def _browse(self) -> None:
         if self._batch:
-            paths, _ = QFileDialog.getOpenFileNames(
-                self, "Клипы для пачки (можно несколько)", "",
-                "Видео (*.mp4 *.mkv *.mov *.webm)")
-            if paths:
-                for p in paths:
-                    if p not in self._batch_sources:
-                        self._batch_sources.append(p)
-                self._show_batch()
+            self._add_clips()
             return
         path, _ = QFileDialog.getOpenFileName(self, "Клип", "", "Видео (*.mp4 *.mkv *.mov *.webm)")
         if path:
@@ -428,22 +718,111 @@ class MainWindow(QMainWindow):
 
     def _set_batch_mode(self, on: bool) -> None:
         self._batch = on
+        self.clip_strip.setVisible(on)
         if on:
-            self.input_edit.setPlaceholderText("В режиме пачки жми «Файл…» и выбирай несколько клипов")
-            self._show_batch()
+            self.input_edit.setPlaceholderText(
+                "Мульти-редактор: добавь клипы в ленте слева от редактора")
+            self.input_status.setText(
+                f"Мульти-редактор: клипов в очереди — {len(self._clips)}. "
+                "Выбирай клип слева, правь его зоны/обрезку/ник, потом «Отрендерить».")
         else:
             self.input_status.setText("—" if not self._input_path
                                       else self.input_status.text())
 
-    def _show_batch(self) -> None:
-        n = len(self._batch_sources)
-        if n == 0:
-            self.input_status.setText("Пачка пуста — добавь клипы кнопкой «Файл…».")
+    # ---- Мульти-редактор: добавление / выбор / удаление клипов ------------
+
+    def _add_clips(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Добавить клипы (можно несколько)", "",
+            "Видео (*.mp4 *.mkv *.mov *.webm)")
+        if not paths:
             return
-        names = ", ".join(os.path.basename(p) for p in self._batch_sources[:6])
-        more = "" if n <= 6 else f" и ещё {n - 6}"
-        self.input_status.setText(f"В пачке {n} клип(ов): {names}{more}. "
-                                  "Настрой раскладку/субтитры и жми «Отрендерить».")
+        from PySide6.QtGui import QGuiApplication as _QGA
+        from PySide6.QtCore import Qt as _Qt
+        _QGA.setOverrideCursor(_Qt.WaitCursor)
+        os.makedirs(WORK_DIR, exist_ok=True)
+        existing = {c.source for c in self._clips}
+        try:
+            for p in paths:
+                if p in existing:
+                    continue
+                item = ClipItem(p)
+                # длительность
+                try:
+                    info = ff.probe_video(p)
+                    item.duration = info.duration
+                    item.end = info.duration
+                except Exception:  # noqa: BLE001
+                    pass
+                # миниатюра (кадр ~1с)
+                idx = len(self._clips)
+                thumb = os.path.join(WORK_DIR, f"_clip_thumb_{idx}.png")
+                try:
+                    tt = min(max(0.5, item.duration * 0.3), max(0.5, item.duration - 0.1))
+                    ff.run_ffmpeg(["-y", "-ss", f"{tt:.2f}", "-i", p, "-frames:v", "1",
+                                   "-vf", "scale=200:-2", thumb])
+                    item.thumb = thumb
+                except Exception:  # noqa: BLE001
+                    pass
+                # композиция-шаблон (копия текущей из редактора) + ник-шаблон
+                item.comp = Composition.from_dict(self.editor.get_composition().to_dict())
+                item.nick = self.nick_edit.text().strip()
+                self._clips.append(item)
+        finally:
+            _QGA.restoreOverrideCursor()
+        self.clip_strip.rebuild(self._clips)
+        # если раньше активного не было — выбрать первый добавленный
+        if self._active_clip < 0 and self._clips:
+            self._select_clip(0)
+        self._set_batch_mode(True)   # обновить статус-строку
+
+    def _select_clip(self, index: int) -> None:
+        if self._rendering or not (0 <= index < len(self._clips)):
+            return
+        self._store_active_edits()   # зафиксировать правки прошлого клипа
+        self._active_clip = index
+        clip = self._clips[index]
+        self.clip_strip.set_active(index)
+        # загрузить клип в редактор
+        self._input_path = clip.source
+        self._duration = clip.duration
+        self._syncing = True
+        self.start_spin.setValue(clip.start)
+        self.end_spin.setValue(clip.end if clip.end > 0 else clip.duration)
+        self._syncing = False
+        self.editor.set_duration(clip.duration)
+        self.editor.set_trim(clip.start, clip.end or clip.duration)
+        if clip.comp is not None:
+            self.editor.set_composition(clip.comp)
+        if clip.nick is not None:
+            self.nick_edit.setText(clip.nick)
+        if clip.thumb and os.path.isfile(clip.thumb):
+            self.editor.set_source_frame(clip.thumb)
+        self._make_filmstrip(clip.source, clip.duration)
+        self._refresh_result()
+
+    def _store_active_edits(self) -> None:
+        """Сохранить обрезку/ник активного клипа (композиция мутируется по ссылке)."""
+        if self._batch and 0 <= self._active_clip < len(self._clips):
+            clip = self._clips[self._active_clip]
+            clip.start = self.start_spin.value()
+            clip.end = self.end_spin.value()
+            clip.nick = self.nick_edit.text().strip()
+
+    def _remove_clip(self, index: int) -> None:
+        if not (0 <= index < len(self._clips)):
+            return
+        del self._clips[index]
+        if self._active_clip == index:
+            self._active_clip = -1
+        elif self._active_clip > index:
+            self._active_clip -= 1
+        self.clip_strip.rebuild(self._clips)
+        if self._clips:
+            self._select_clip(min(index, len(self._clips) - 1))
+        else:
+            self._active_clip = -1
+        self._set_batch_mode(True)
 
     def _track(self, thread):
         """Держать ссылку на поток, пока он жив (иначе GC рушит QThread на ходу)."""
@@ -569,22 +948,28 @@ class MainWindow(QMainWindow):
 
     def _build_pipeline(self) -> PipelineConfig:
         cw, ch = self._canvas()
+        hl_mode = {"Выкл": "none", "Плашка": "box", "Цвет": "color"}.get(
+            self.hl_chips.current(), "none")
         style = CaptionStyle(
             outline_width=self.outline_slider.value() / 100.0 * 12.0,
             box=self.box_slider.value() > 5,
             box_opacity=self.box_slider.value() / 100.0,
+            highlight_mode=hl_mode,
         )
         prof_mode = PROFANITY_MODES[self.prof_chips.current()]
+        comp = self.editor.get_composition()
         return PipelineConfig(
             source=self._input_path or self.input_edit.text().strip(),
             start=self.start_spin.value(),
             end=self.end_spin.value() if self.end_spin.value() > 0 else None,
-            composition=self.editor.get_composition(),   # свободная компоновка на 9:16
+            composition=comp,                            # свободная компоновка на 9:16
+            captions_enabled=getattr(comp.subtitles, "visible", True),  # глаз субтитров в редакторе
             export=ExportConfig(width=cw, height=ch, fps=int(self.fps_combo.currentText()),
                                 codec=VideoCodec.X264 if self.cpu_check.isChecked() else VideoCodec.NVENC,
                                 out_dir=self._out_dir, filename=self._out_filename()),
             caption_style=style,
             caption_animation=CaptionAnimation(ANIM_MAP[self.anim_chips.current()]),
+            highlight_keywords=(hl_mode != "none"),
             profanity_enabled=(prof_mode != "off"),
             profanity_mode=("beep" if prof_mode == "beep" else "silence"),
             branding=self._current_branding(),
@@ -625,41 +1010,79 @@ class MainWindow(QMainWindow):
         t.start()
 
     def _render_batch(self) -> None:
-        """Рендер пачкой: каждый клип с ТЕКУЩИМИ настройками, свой файл по имени клипа."""
-        srcs = list(self._batch_sources)
-        if not srcs:  # запасной вариант — одиночный вход, если пачка пуста
-            one = self._input_path or self.input_edit.text().strip()
-            if one:
-                srcs = [one]
-        if not srcs:
-            self.wizard.set_step(0)
-            QMessageBox.warning(self, "Пачка пуста",
-                                "Добавь клипы кнопкой «Файл…» на шаге 1 (в режиме «Пачкой»).")
+        """Мульти-редактор: очередь клипов. Общий шаблон (стиль субтитров/платформа/
+        экспорт) + ПРАВКИ под клип (зоны, обрезка, ник). Каждый — в свой файл."""
+        self._store_active_edits()   # зафиксировать правки открытого клипа
+        if not self._clips:
+            QMessageBox.warning(self, "Нет клипов",
+                                "Добавь клипы в ленту слева («+ Добавить клипы»).")
             return
-        base = self._build_pipeline()          # общие настройки (композиция/субтитры/брендинг)
+        template = self._build_pipeline()      # шаблон общих настроек
         pcfgs = []
-        for s in srcs:
-            pc = self._build_pipeline()
-            pc.source = s
-            pc.start, pc.end = 0.0, None        # в пачке берём клип целиком
-            pc.composition = base.composition
-            stem = os.path.splitext(os.path.basename(s))[0] or "clip"
+        for clip in self._clips:
+            pc = self._build_pipeline()        # копия шаблона
+            pc.source = clip.source
+            pc.start = clip.start
+            pc.end = clip.end if clip.end and clip.end > clip.start else None
+            pc.composition = clip.comp or template.composition   # зоны этого клипа
+            # ник — индивидуальный, платформа/стиль — из шаблона
+            pc.branding = BrandingConfig(nickname=(clip.nick or "").strip(),
+                                         platform=template.branding.platform)
+            stem = os.path.splitext(os.path.basename(clip.source))[0] or "clip"
             for ch in '<>:"/\\|?*':
                 stem = stem.replace(ch, "_")
             pc.export.out_dir = self._out_dir
             pc.export.filename = stem + "_vertical.mp4"
+            clip.status = "pending"; clip.frac = 0.0
             pcfgs.append(pc)
-        self.loader.start()
+        self.clip_strip.refresh_all()
+        self._batch_n = len(pcfgs)
+        # Мульти-режим: НЕ перекрываем экран загрузчиком — прогресс живьём на карточках.
+        self._set_rendering_ui(True)
         t = self._track(W.BatchRenderThread(pcfgs))
-        t.progress.connect(self.loader.set_progress)
+        t.progress.connect(self._batch_progress)
         t.finished_ok.connect(self._batch_done)
         t.failed.connect(self._render_fail)
         t.start()
 
+    def _set_rendering_ui(self, on: bool) -> None:
+        """Во время очереди блокируем редактирование, но экран не прячем (виден прогресс)."""
+        self._rendering = on
+        for w in (self.wizard, self.editor):
+            w.setEnabled(not on)
+        self.clip_strip.set_add_enabled(not on)
+        self.batch_single.setEnabled(not on)
+        self.batch_many.setEnabled(not on)
+        if hasattr(self, "profile_combo"):
+            self.profile_combo.setEnabled(not on)
+            self.profile_save_btn.setEnabled(not on)
+            self.profile_del_btn.setEnabled(not on)
+        if not on:
+            self.clip_strip.set_header("Клипы")
+
+    def _batch_progress(self, frac: float, stage: str) -> None:
+        """Общий прогресс в шапку ленты + пометка статусов/процентов карточек клипов."""
+        n = getattr(self, "_batch_n", 0) or len(self._clips)
+        if n <= 0:
+            return
+        cur = min(int(frac * n), n - 1)      # индекс текущего клипа
+        for i, clip in enumerate(self._clips):
+            if i < cur:
+                clip.status = "done"; clip.frac = 1.0
+            elif i == cur:
+                clip.status = "processing"; clip.frac = max(0.0, frac * n - cur)
+            self.clip_strip.update_card(i)
+        self.clip_strip.set_header(f"Обработка {cur + 1}/{n} · {int(frac * 100)}%", busy=True)
+
     def _batch_done(self, outs: list) -> None:
         from PySide6.QtCore import QTimer
-        self.loader.finish()
-        QTimer.singleShot(280, self.loader.stop)
+        for i, clip in enumerate(self._clips):
+            clip.status = "done"; clip.frac = 1.0
+            if i < len(outs):
+                clip.out_path = outs[i]
+        self.clip_strip.refresh_all()
+        self._set_rendering_ui(False)
+        self.clip_strip.set_header(f"Готово: {len(outs)}")
         QTimer.singleShot(300, lambda: self._show_batch_done(outs))
 
     def _show_batch_done(self, outs: list) -> None:
@@ -732,14 +1155,8 @@ class MainWindow(QMainWindow):
     # ======================================================================
 
     def _style_updates_btn(self, has_update: bool) -> None:
-        if has_update:
-            self.updates_btn.setText("Обновление есть")
-            self.updates_btn.setStyleSheet(
-                "background:#37c9c2;border:none;border-radius:8px;color:#06231f;"
-                "padding:7px 13px;font-weight:800;")
-        else:
-            self.updates_btn.setText("Обновления")
-            self.updates_btn.setStyleSheet("")   # обычный вид из QSS — ненавязчиво
+        # Совместимость: перенаправляем на статус пилюли версии.
+        self.version_pill.set_status("update" if has_update else "uptodate")
 
     def _check_update(self) -> None:
         """Тихая фоновая проверка при старте."""
@@ -755,6 +1172,8 @@ class MainWindow(QMainWindow):
         self._latest_info = info
         self._update_info = info
         self._style_updates_btn(has_update=True)
+        self.version_pill.setToolTip(f"Доступна новая версия v{info.get('version', '?')} — "
+                                     "нажми, чтобы открыть меню обновлений.")
         if getattr(self, "_updates_dialog", None):
             self._updates_dialog.set_state("update", info)
         # Одноразовое ненавязчивое предложение зайти в меню обновлений.
@@ -777,6 +1196,7 @@ class MainWindow(QMainWindow):
             self._updates_dialog.set_state("uptodate")
 
     def _on_update_failed(self, err: str) -> None:
+        self.version_pill.set_status("error")
         if getattr(self, "_updates_dialog", None):
             self._updates_dialog.set_state("error", error=err)
 
@@ -785,8 +1205,8 @@ class MainWindow(QMainWindow):
         from core.version import __version__
         dlg = getattr(self, "_updates_dialog", None)
         if dlg is None:
-            dlg = UpdatesDialog(__version__, accent="#37c9c2", parent=self)
-            dlg.setStyleSheet(self.styleSheet())   # единая тема с приложением
+            dlg = UpdatesDialog(__version__, theme=self._theme, accent="#37c9c2",
+                                parent=self)
             dlg.recheck.connect(self._dialog_recheck)
             dlg.do_update.connect(self._do_update)
             dlg.finished.connect(lambda _r: setattr(self, "_updates_dialog", None))
@@ -863,6 +1283,12 @@ class MainWindow(QMainWindow):
 
     def _render_fail(self, msg: str) -> None:
         self.loader.stop()
+        if self._batch:
+            for clip in self._clips:
+                if clip.status == "processing":
+                    clip.status = "error"
+            self.clip_strip.refresh_all()
+            self._set_rendering_ui(False)
         self._err(msg)
 
     def _err(self, msg: str) -> None:
@@ -902,8 +1328,20 @@ class MainWindow(QMainWindow):
             self.resize(1320, 860)
 
     def closeEvent(self, e) -> None:
+        # Если бот работает, а «закрытие сворачивает в трей» включено — не выходим,
+        # иначе автопилот молча умрёт вместе с окном.
+        if not getattr(self, "_force_quit", False) and self._should_hide_instead_of_close():
+            e.ignore()
+            self.hide_to_tray()
+            return
+
         self._settings.setValue("geometry", self.saveGeometry())
         self._settings.setValue("theme", self._theme)
+        # Бот и вход через Twitch крутят свои потоки — гасим их первыми.
+        try:
+            self.marks_panel.bot_panel.shutdown()
+        except Exception:       # noqa: BLE001 — на выходе не мешаем закрытию окна
+            pass
         # Дождаться живых потоков, чтобы Qt не рушил их на выходе.
         for th in list(self._threads):
             try:

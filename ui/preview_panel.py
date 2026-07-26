@@ -21,8 +21,9 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QVBoxLayout, QHBoxLayout
 
 from core.config import (Zone, Placement, Composition, LayoutPreset,
                          composition_from_preset)
-from .theme import ZONE_COLORS
-from .widgets import HelpIcon
+from core import safezones
+from .theme import ZONE_COLORS, PALETTE
+from .widgets import HelpIcon, ChipRow, EyeToggle
 
 
 class ZoneBox(QWidget):
@@ -202,6 +203,7 @@ class AspectCanvas(QFrame):
         self.aspect = 16 / 9
         self._pixmap: Optional[QPixmap] = None
         self.zones: list[ZoneBox] = []
+        self._safezones: list = []      # список SafeRect (safezones.py) — подсказка «занятых» зон
         # Размер холста задаёт CanvasArea (вписывает по доступному месту).
 
     def set_aspect(self, w: int, h: int) -> None:
@@ -228,9 +230,33 @@ class AspectCanvas(QFrame):
             if z.name == name:
                 z.raise_()
 
+    def set_safezones(self, rects: list) -> None:
+        """Задать «занятые» интерфейсом площадки зоны (список SafeRect) — подсказка."""
+        self._safezones = rects or []
+        self.update()
+
     def resizeEvent(self, e) -> None:
         for z in self.zones:
             z.reposition()
+
+    def _draw_safezones(self, pt: QPainter) -> None:
+        """Полупрозрачная штриховка «сюда интерфейс площадки залезет — не ставь важное»."""
+        W, H = self.width(), self.height()
+        warn = QColor(255, 84, 84)
+        for r in self._safezones:
+            rect = QRect(int(r.x * W), int(r.y * H),
+                         max(1, int(r.w * W)), max(1, int(r.h * H)))
+            fill = QColor(warn); fill.setAlpha(38)
+            pt.setBrush(QBrush(fill, Qt.BDiagPattern))
+            pen = QPen(warn, 1.4, Qt.DashLine); pen.setColor(QColor(255, 120, 120, 200))
+            pt.setPen(pen)
+            pt.drawRect(rect)
+            # подпись — если зона достаточно высокая
+            if rect.height() >= 26:
+                pt.setPen(QColor(255, 190, 190))
+                f = pt.font(); f.setPointSizeF(max(6.0, min(9.0, W / 60))); pt.setFont(f)
+                pt.drawText(rect.adjusted(5, 3, -3, -3),
+                            Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap, r.label)
 
     def paintEvent(self, e) -> None:
         super().paintEvent(e)
@@ -242,6 +268,9 @@ class AspectCanvas(QFrame):
             pt.fillRect(self.rect(), QColor("#0d0f14"))
             pt.setPen(QColor("#4a4668"))
             pt.drawText(self.rect(), Qt.AlignCenter, "9:16 канва")
+        if self._safezones:
+            pt.setRenderHint(QPainter.Antialiasing, False)
+            self._draw_safezones(pt)
 
 
 class CanvasArea(QWidget):
@@ -445,16 +474,20 @@ class EditorPanel(QFrame):
     trim_changed = Signal(float, float)   # начало/конец отрезка (сек) из таймлайна
     trim_scrub = Signal(float)            # позиция для обновления стоп-кадра
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_trim: bool = True):
         super().__init__(parent)
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._show_trim = show_trim   # False — редактор раскладки без дорожки обрезки (Этап 2)
         # Дефолтная композиция (пресет A) — источник clip-подобный.
         self.comp = composition_from_preset(
             LayoutPreset.A, Zone(0.0, 0.73, 0.235, 0.265), Zone(0.0, 0.13, 1.0, 0.74))
         self._mode = "source"   # 'source' (16:9) | 'final' (9:16)
         self._selected = None   # имя выбранной для редактирования зоны
         self._legend_btns: dict = {}
+        self._eye_btns: dict = {}
+        self._theme = "dark"
+        self._safezone_key = None  # выбранная площадка safe-зон (tiktok/shorts/reels) или None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -473,15 +506,31 @@ class EditorPanel(QFrame):
         top.addStretch(1)
         self.change_btn = QPushButton("Изменить кадр")
         self.change_btn.clicked.connect(self.change_frame.emit)
+        self.change_btn.setVisible(show_trim)   # в Этапе 2 кадр берётся из момента, кнопка не нужна
         top.addWidget(self.change_btn)
         root.addLayout(top)
+
+        # Ряд safe-зон: показать, куда залезает интерфейс площадки (только подсказка).
+        sz_row = QHBoxLayout(); sz_row.setSpacing(8)
+        sz_lab = QLabel("Safe-зоны:")
+        sz_lab.setStyleSheet("font-size:12px;font-weight:600;")
+        self.safezone_chips = ChipRow(["Выкл", "TikTok", "Shorts", "Reels"])
+        self.safezone_chips.changed.connect(self._on_safezone)
+        sz_row.addWidget(sz_lab)
+        sz_row.addWidget(self.safezone_chips, 1)
+        sz_row.addWidget(HelpIcon("Показывает, где интерфейс TikTok/Shorts/Reels "
+                                  "перекрывает кадр. Держи субтитры и ник вне красных зон. "
+                                  "В готовое видео это НЕ вжигается — только подсказка."))
+        root.addLayout(sz_row)
 
         # Холст вписывается в среднюю область; легенда/таймлайн всегда видны снизу.
         self.canvas = AspectCanvas("albumScreen")
         self.canvas_area = CanvasArea(self.canvas)
         root.addWidget(self.canvas_area, 1)
         root.addWidget(self._legend())
-        root.addWidget(self._timeline())
+        tl = self._timeline()                 # создаём всегда (методы set_trim/… безопасны)
+        tl.setVisible(self._show_trim)        # дорожку обрезки показываем только в Этапе 1
+        root.addWidget(tl)                    # добавляем всегда (иначе виджет удалится сборщиком)
 
         self._rebuild_zones()
 
@@ -499,6 +548,24 @@ class EditorPanel(QFrame):
             self.canvas.set_frame(None)
         self.canvas_area.refit()
         self._rebuild_zones()
+        self._apply_safezones()
+
+    def _on_safezone(self, text: str) -> None:
+        """Выбор площадки для safe-зон. 'Выкл' — снять; иначе показать (и уйти в 9:16)."""
+        key = {"tiktok": "tiktok", "shorts": "shorts", "reels": "reels"}.get(text.lower())
+        self._safezone_key = key
+        if key and self._mode != "final":
+            self.set_mode("final")     # safe-зоны имеют смысл на финальном 9:16 холсте
+        else:
+            self._apply_safezones()
+
+    def _apply_safezones(self) -> None:
+        """Передать холсту прямоугольники выбранной площадки (только в режиме финалки)."""
+        if self._mode == "final" and self._safezone_key:
+            preset = safezones.preset(self._safezone_key)
+            self.canvas.set_safezones(list(preset.rects) if preset else [])
+        else:
+            self.canvas.set_safezones([])
 
     def _rebuild_zones(self) -> None:
         self.canvas.clear_zones()
@@ -538,54 +605,103 @@ class EditorPanel(QFrame):
 
     # ---- легенда/таймлайн ------------------------------------------------
 
+    # Соответствие «имя зоны → элемент композиции» (для выключателей видимости).
+    def _placement_for(self, name: str):
+        return {"Вебка": self.comp.webcam, "Геймплей": self.comp.gameplay,
+                "Субтитры": self.comp.subtitles, "Ник": self.comp.nick,
+                "Платформа": self.comp.platform}.get(name)
+
     def _legend(self) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
-        hint = QLabel("Выбери зону, чтобы её редактировать (чтобы случайно не двигать другую):")
-        hint.setStyleSheet("color:#c2bde0;font-size:11px;")
+        hint = QLabel("Клик по зоне — редактировать её. Глаз справа — показать/скрыть "
+                      "панель в готовом клипе.")
+        hint.setStyleSheet(f"color:{PALETTE[self._theme]['muted']};font-size:11px;")
         hint.setWordWrap(True)
+        self._legend_hint = hint
         v.addWidget(hint)
         grid = QGridLayout(); grid.setSpacing(7)
         items = [("cam", "Вебка", "Лицо, не обрезается"), ("game", "Геймплей", "Картинка игры"),
                  ("sub", "Субтитры", "Зона текста"), ("brand", "Ник", "Имя на клипе"),
                  ("plat", "Платформа", "Значок площадки")]
         for i, (key, name, desc) in enumerate(items):
+            cell = QWidget()
+            cl = QHBoxLayout(cell); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(4)
             btn = QPushButton(); btn.setCursor(Qt.PointingHandCursor)
             btn._zname = name; btn._zcolor = ZONE_COLORS[key]
-            bl = QHBoxLayout(btn); bl.setContentsMargins(9, 6, 9, 6); bl.setSpacing(8)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            bl = QHBoxLayout(btn); bl.setContentsMargins(9, 6, 6, 6); bl.setSpacing(8)
             sw = QLabel(); sw.setFixedSize(13, 13)
             sw.setStyleSheet(f"background:{ZONE_COLORS[key]};border-radius:4px;")
-            txt = QLabel(f"<b>{name}</b><br><span style='color:#c2bde0;font-size:11px'>{desc}</span>")
+            txt = QLabel(); txt._name = name; txt._desc = desc
+            self._style_legend_text(txt)
+            btn._txt = txt
             bl.addWidget(sw); bl.addWidget(txt); bl.addStretch(1)
             btn.clicked.connect(lambda _=False, n=name: self._select_zone(n))
+            eye = EyeToggle(ZONE_COLORS[key])
+            pl = self._placement_for(name)
+            eye.setChecked(getattr(pl, "visible", True) if pl else True)
+            eye.toggled.connect(lambda on, n=name: self._toggle_zone_visible(n, on))
+            self._eye_btns[name] = eye
+            cl.addWidget(btn, 1); cl.addWidget(eye)
             self._legend_btns[name] = btn
-            grid.addWidget(btn, i // 3, i % 3)
+            grid.addWidget(cell, i // 3, i % 3)
         for c in range(3):
             grid.setColumnStretch(c, 1)
         v.addLayout(grid)
         return w
 
+    def _toggle_zone_visible(self, name: str, on: bool) -> None:
+        pl = self._placement_for(name)
+        if pl is None or getattr(pl, "visible", True) == on:
+            return
+        pl.visible = on
+        if not on and self._selected == name:
+            self._selected = None
+        self._rebuild_zones()               # скрытая зона исчезает с холста 9:16
+        self.composition_changed.emit()
+
+    def _style_legend_text(self, txt) -> None:
+        c = PALETTE[self._theme]
+        txt.setText(f"<b style='color:{c['text']}'>{txt._name}</b>"
+                    f"<br><span style='color:{c['muted']};font-size:11px'>{txt._desc}</span>")
+
     def _style_legend_btn(self, btn, selected: bool, enabled: bool) -> None:
         color = btn._zcolor
+        c = PALETTE[self._theme]
         if selected:
-            css = (f"QPushButton{{text-align:left;background:#201d30;border:2px solid {color};"
+            css = (f"QPushButton{{text-align:left;background:{c['panel2']};border:2px solid {color};"
                    f"border-radius:8px;}}")
         elif enabled:
-            css = (f"QPushButton{{text-align:left;background:#191826;border:1px solid #2a2740;"
+            css = (f"QPushButton{{text-align:left;background:{c['panel']};border:1px solid {c['line']};"
                    f"border-radius:8px;}} QPushButton:hover{{border-color:{color};}}")
         else:
-            css = ("QPushButton{text-align:left;background:#141320;border:1px solid #201d30;"
-                   "border-radius:8px;}")
+            css = (f"QPushButton{{text-align:left;background:{c['bg']};border:1px solid {c['line']};"
+                   f"border-radius:8px;}}")
         btn.setStyleSheet(css)
 
     def _refresh_legend_state(self) -> None:
         if not self._legend_btns:
             return
         present = [z.name for z in self.canvas.zones]
+        final = (self._mode == "final")
         for name, btn in self._legend_btns.items():
             en = name in present
             btn.setEnabled(en)
             self._style_legend_btn(btn, self._selected == name and en, en)
+            # Глаз-видимость: активен на финалке (там собирается вывод), где панель применима.
+            eye = self._eye_btns.get(name)
+            if eye is not None:
+                pl = self._placement_for(name)
+                applies = final and pl is not None
+                eye.setEnabled(applies)
+                eye.setToolTip("Включается на холсте «9:16 · Финалка»" if not applies
+                               else ("Панель показана в клипе — нажми, чтобы скрыть"
+                                     if eye.isChecked() else
+                                     "Панель скрыта — нажми, чтобы показать"))
+                want = getattr(pl, "visible", True) if pl else True
+                if eye.isChecked() != want:
+                    eye.blockSignals(True); eye.setChecked(want); eye.blockSignals(False)
 
     def _select_zone(self, name: str) -> None:
         present = [z.name for z in self.canvas.zones]
@@ -604,9 +720,23 @@ class EditorPanel(QFrame):
         self.timeline.scrub.connect(self.trim_scrub.emit)
         v.addWidget(self.timeline)
         self.tl_row = QLabel("Перетаскивай ручки начала и конца прямо на дорожке со стоп-кадрами")
-        self.tl_row.setStyleSheet("color:#c2bde0;font-size:11px;")
+        self.tl_row.setStyleSheet(f"color:{PALETTE[self._theme]['muted']};font-size:11px;")
         v.addWidget(self.tl_row)
         return w
+
+    def set_theme(self, theme: str) -> None:
+        """Перекрасить подписи/легенду редактора под тему (холст-превью остаётся тёмным
+        — как в настоящих видеоредакторах). Вызывает main_window при смене темы."""
+        self._theme = theme
+        c = PALETTE[theme]
+        if hasattr(self, "_legend_hint"):
+            self._legend_hint.setStyleSheet(f"color:{c['muted']};font-size:11px;")
+        if hasattr(self, "tl_row"):
+            self.tl_row.setStyleSheet(f"color:{c['muted']};font-size:11px;")
+        for btn in self._legend_btns.values():
+            if hasattr(btn, "_txt"):
+                self._style_legend_text(btn._txt)
+        self._refresh_legend_state()
 
     # ---- API -------------------------------------------------------------
 
@@ -622,6 +752,23 @@ class EditorPanel(QFrame):
 
     def get_composition(self) -> Composition:
         return self.comp
+
+    def set_composition(self, comp: Composition) -> None:
+        """Заменить композицию целиком (например, из профиля стримера) и перерисовать."""
+        self.comp = comp
+        self._rebuild_zones()
+        self.canvas_area.refit()
+        self.composition_changed.emit()
+
+    def get_safezone_key(self):
+        return self._safezone_key
+
+    def set_safezone(self, key) -> None:
+        """Выставить площадку safe-зон из профиля (key: tiktok/shorts/reels или None)."""
+        text = {"tiktok": "TikTok", "shorts": "Shorts", "reels": "Reels"}.get(key or "", "Выкл")
+        self.safezone_chips.set_current(text)
+        self._safezone_key = key
+        self._apply_safezones()
 
     # ---- таймлайн обрезки ------------------------------------------------
 

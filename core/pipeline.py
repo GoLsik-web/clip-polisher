@@ -45,12 +45,20 @@ class PipelineConfig:
     source: str                                   # файл или URL
     start: float = 0.0
     end: Optional[float] = None                   # None → до конца
+    # Этап 2: явный СПИСОК сегментов для склейки разнесённых моментов одного стрима.
+    # Если задан и не пуст — используется вместо пары start/end (тогда клип = склейка
+    # этих отрезков подряд). remap слов и render concat уже умеют несколько сегментов.
+    segments: Optional[list] = None               # list[Segment] | None
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     # Субтитры
     captions_enabled: bool = True
     caption_style: CaptionStyle = field(default_factory=CaptionStyle)
     caption_animation: CaptionAnimation = CaptionAnimation.POP
+    # Яркая подсветка ключевых слов: 'box' | 'color' | 'none' (в caption_style тоже
+    # есть highlight_mode — это удобный дубль для UI; ключи считаем при != 'none').
+    highlight_keywords: bool = False
+    key_overrides: dict = field(default_factory=dict)   # {индекс слова: True/False} — ручная правка из UI
     # Мат
     profanity_enabled: bool = True
     profanity_mode: str = "beep"          # 'beep' (тон) | 'silence' (заглушить)
@@ -60,6 +68,10 @@ class PipelineConfig:
     branding: BrandingConfig = field(default_factory=BrandingConfig)
     # Звук
     loudnorm: bool = True
+    # Продвинутый звук (Этап 2): шумодав / чёткость голоса / гейт
+    denoise: bool = False
+    clarity: bool = False
+    gate: bool = False
     # Транскрипция
     language: Optional[str] = "ru"
     model_size: str = "large-v3"
@@ -103,8 +115,12 @@ def run(pcfg: PipelineConfig, on_progress: Optional[ProgressCb] = None) -> str:
 
     from . import ffmpeg_utils as ff
     info = ff.probe_video(input_path)
-    end = pcfg.end if pcfg.end is not None else info.duration
-    segments = [Segment(start=pcfg.start, end=end)]
+    if pcfg.segments:
+        # Этап 2: склейка нескольких моментов одного стрима.
+        segments = list(pcfg.segments)
+    else:
+        end = pcfg.end if pcfg.end is not None else info.duration
+        segments = [Segment(start=pcfg.start, end=end)]
 
     # 2) Transcribe --------------------------------------------------------
     prog(0.10, "Распознавание речи (Whisper, GPU)")
@@ -133,6 +149,11 @@ def run(pcfg: PipelineConfig, on_progress: Optional[ProgressCb] = None) -> str:
         if pcfg.composition is not None:
             sub = pcfg.composition.subtitles
             pcfg.caption_style.position_v = min(0.95, max(0.05, sub.y + sub.h / 2))
+        # Подсветка ключевых слов: авто-детект + ручные правки из UI.
+        if pcfg.highlight_keywords and pcfg.caption_style.highlight_mode != "none":
+            n_key = captions_mod.mark_keywords(words)
+            captions_mod.apply_key_overrides(words, pcfg.key_overrides)
+            prog(0.60, f"Подсветка ключевых слов: {n_key}")
         captions_mod.write_ass(ass_path, words, style=pcfg.caption_style,
                                animation=pcfg.caption_animation,
                                canvas_w=pcfg.export.width, canvas_h=pcfg.export.height)
@@ -151,6 +172,7 @@ def run(pcfg: PipelineConfig, on_progress: Optional[ProgressCb] = None) -> str:
         beep_intervals=beep_intervals,
         beep_mode=pcfg.profanity_mode,
         loudnorm=pcfg.loudnorm,
+        denoise=pcfg.denoise, clarity=pcfg.clarity, gate=pcfg.gate,
     )
 
     def render_prog(frac: float) -> None:
@@ -196,6 +218,8 @@ def _main() -> None:
     ap.add_argument("--no-profanity", action="store_true")
     ap.add_argument("--no-captions", action="store_true")
     ap.add_argument("--box", action="store_true", help="плашка под субтитрами")
+    ap.add_argument("--highlight", choices=["box", "color", "none"], default="none",
+                    help="яркая подсветка ключевых слов")
     ap.add_argument("--out", default="out/final.mp4")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
@@ -208,9 +232,10 @@ def _main() -> None:
         export=ExportConfig(codec=VideoCodec.X264 if args.cpu else VideoCodec.NVENC,
                             out_dir=os.path.dirname(args.out) or ".",
                             filename=os.path.basename(args.out)),
-        caption_style=CaptionStyle(box=args.box),
+        caption_style=CaptionStyle(box=args.box, highlight_mode=args.highlight),
         caption_animation=CaptionAnimation(args.anim),
         captions_enabled=not args.no_captions,
+        highlight_keywords=args.highlight != "none",
         profanity_enabled=not args.no_profanity,
         branding=BrandingConfig(nickname=args.nick, platform=Platform(args.platform)),
     )

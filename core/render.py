@@ -34,6 +34,10 @@ class RenderExtras:
     beep_intervals: Optional[list[tuple[float, float]]] = None  # в координатах выхода
     beep_mode: str = "beep"                             # 'beep' | 'silence'
     loudnorm: bool = True
+    # Продвинутый звук (Этап 2)
+    denoise: bool = False
+    clarity: bool = False
+    gate: bool = False
 
 
 def _esc_filter_path(path: str) -> str:
@@ -98,7 +102,8 @@ def _build_graph(cfg: ProjectConfig, info: ff.VideoInfo,
         # tone_label — вход sine (индекс 1), нужен только для режима 'beep'.
         parts.extend(audio_mod.build_audio_filter(
             intervals, src_label="acat", tone_label="1:a",
-            out_label="aout", loudnorm=extras.loudnorm, mode=extras.beep_mode))
+            out_label="aout", loudnorm=extras.loudnorm, mode=extras.beep_mode,
+            denoise=extras.denoise, clarity=extras.clarity, gate=extras.gate))
 
     return ";".join(parts), use_audio, need_tone
 

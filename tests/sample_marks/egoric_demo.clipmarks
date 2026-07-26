@@ -1,0 +1,52 @@
+{
+  "platform": "twitch",
+  "streamer": "egoric",
+  "broadcast_id": "demo-30s",
+  "started_at": "",
+  "duration": 30,
+  "online": 180,
+  "marks": [
+    {
+      "t": 5.0,
+      "type": "streamer",
+      "author": "egoric",
+      "note": "рофл про кота"
+    },
+    {
+      "t": 6.0,
+      "type": "viewer",
+      "author": "vasya",
+      "note": ""
+    },
+    {
+      "t": 6.5,
+      "type": "moderator",
+      "author": "mod_kolya",
+      "note": ""
+    },
+    {
+      "t": 7.0,
+      "type": "viewer",
+      "author": "petya",
+      "note": ""
+    },
+    {
+      "t": 26.0,
+      "type": "streamer",
+      "author": "egoric",
+      "note": "клатч 1в3"
+    },
+    {
+      "t": 27.0,
+      "type": "viewer",
+      "author": "katya",
+      "note": ""
+    },
+    {
+      "t": 27.4,
+      "type": "vip",
+      "author": "vip_dima",
+      "note": ""
+    }
+  ]
+}

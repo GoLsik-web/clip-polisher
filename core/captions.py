@@ -52,6 +52,16 @@ class CaptionStyle:
     highlight: RGB = (255, 214, 10)     # янтарный
     # Вертикальная позиция центра текста как доля высоты канвы (0..1).
     position_v: float = 0.72
+    # --- Яркая подсветка «ударных» слов (MrBeast-стиль) ---
+    # 'box'   — ключевое слово в яркой заливке-плашке (по умолчанию);
+    # 'color' — ключевое слово ярким цветом с обводкой (без плашки);
+    # 'none'  — подсветки нет (все слова одинаковые).
+    highlight_mode: str = "box"
+    key_fill: RGB = (245, 197, 24)      # цвет плашки под ключевым словом (жёлтый)
+    key_ink: RGB = (18, 14, 10)         # цвет текста НА плашке (тёмный, читаемый)
+    key_color: RGB = (255, 209, 26)     # цвет текста в режиме 'color'
+    key_scale: float = 1.06             # ключевое слово чуть крупнее обычного
+    key_pad: float = 7.0                # «толщина» плашки (padding), BorderStyle=3
 
 
 # --------------------------------------------------------------------------
@@ -103,15 +113,43 @@ def _disp(text: str) -> str:
 # Заголовок + стиль
 # --------------------------------------------------------------------------
 
-def _header(style: CaptionStyle, canvas_w: int, canvas_h: int) -> str:
+_STYLE_FMT = ("Style: {name},{font},{size},{primary},{secondary},{outline},{back},"
+              "{bold},0,0,0,100,100,0,0,{bstyle},{ow},{shadow},5,40,40,60,204")
+
+
+def _main_style_line(style: CaptionStyle) -> str:
     border_style = 3 if style.box else 1
     outline_colour = ass_color(style.box_color, style.box_opacity) if style.box \
         else ass_color(style.outline_color, 1.0)
-    back_colour = ass_color(style.box_color, style.box_opacity)
-    primary = ass_color(style.primary, 1.0)
-    secondary = ass_color(style.highlight, 1.0)  # для \k: «ещё не спетый» цвет
-    bold = -1 if style.bold else 0
+    return _STYLE_FMT.format(
+        name="Main", font=style.font_name, size=style.font_size,
+        primary=ass_color(style.primary, 1.0),
+        secondary=ass_color(style.highlight, 1.0),  # для \k: «ещё не спетый» цвет
+        outline=outline_colour, back=ass_color(style.box_color, style.box_opacity),
+        bold=-1 if style.bold else 0, bstyle=border_style,
+        ow=style.outline_width, shadow=style.shadow)
 
+
+def _key_style_line(style: CaptionStyle) -> str:
+    """Стиль «Key» — для ударных слов. box → яркая плашка; иначе → яркий текст+обводка."""
+    key_size = round(style.font_size * style.key_scale)
+    if style.highlight_mode == "box":
+        primary = ass_color(style.key_ink, 1.0)         # тёмный текст на плашке
+        outline = ass_color(style.key_fill, 1.0)        # плашка = заливка обводки
+        back = ass_color(style.key_fill, 1.0)
+        bstyle, ow = 3, style.key_pad
+    else:  # 'color' (и 'none' — стиль определён, но не используется)
+        primary = ass_color(style.key_color, 1.0)       # яркий цвет текста
+        outline = ass_color(style.outline_color, 1.0)   # чёрная обводка
+        back = ass_color(style.box_color, style.box_opacity)
+        bstyle, ow = 1, style.outline_width
+    return _STYLE_FMT.format(
+        name="Key", font=style.font_name, size=key_size, primary=primary,
+        secondary=ass_color(style.highlight, 1.0), outline=outline, back=back,
+        bold=-1 if style.bold else 0, bstyle=bstyle, ow=ow, shadow=style.shadow)
+
+
+def _header(style: CaptionStyle, canvas_w: int, canvas_h: int) -> str:
     # Alignment=5 (центр по обеим осям) — позицию задаём через \pos в событиях.
     return f"""[Script Info]
 ScriptType: v4.00+
@@ -123,15 +161,23 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{style.font_name},{style.font_size},{primary},{secondary},{outline_colour},{back_colour},{bold},0,0,0,100,100,0,0,{border_style},{style.outline_width},{style.shadow},5,40,40,60,204
+{_main_style_line(style)}
+{_key_style_line(style)}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
 
-def _dialogue(start: float, end: float, text: str) -> str:
-    return f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Main,,0,0,0,,{text}\n"
+def _dialogue(start: float, end: float, text: str, style: str = "Main") -> str:
+    return f"Dialogue: 0,{ass_time(start)},{ass_time(end)},{style},,0,0,0,,{text}\n"
+
+
+def _style_for(w, style: CaptionStyle) -> str:
+    """Имя стиля для слова: 'Key' если оно ударное и подсветка включена, иначе 'Main'."""
+    if getattr(w, "key", False) and style.highlight_mode != "none":
+        return "Key"
+    return "Main"
 
 
 # --------------------------------------------------------------------------
@@ -193,7 +239,7 @@ def anim_pop(words, style, canvas_w, canvas_h) -> list[str]:
                 f"\\fscx55\\fscy55"
                 f"\\t(0,110,\\fscx116\\fscy116)"
                 f"\\t(110,200,\\fscx100\\fscy100)}}")
-        out.append(_dialogue(w.start, end, tags + _disp(w.text)))
+        out.append(_dialogue(w.start, end, tags + _disp(w.text), style=_style_for(w, style)))
     return out
 
 
@@ -204,7 +250,7 @@ def anim_fade(words, style, canvas_w, canvas_h) -> list[str]:
     for i, w in enumerate(words):
         end = _word_end(words, i)
         tags = f"{{\\an5\\pos({cx},{cy})\\fad(140,90)}}"
-        out.append(_dialogue(w.start, end, tags + _disp(w.text)))
+        out.append(_dialogue(w.start, end, tags + _disp(w.text), style=_style_for(w, style)))
     return out
 
 
@@ -217,13 +263,17 @@ def anim_slide_up(words, style, canvas_w, canvas_h) -> list[str]:
         end = _word_end(words, i)
         tags = (f"{{\\an5\\fad(120,70)"
                 f"\\move({cx},{cy + dy},{cx},{cy},0,160)}}")
-        out.append(_dialogue(w.start, end, tags + _disp(w.text)))
+        out.append(_dialogue(w.start, end, tags + _disp(w.text), style=_style_for(w, style)))
     return out
 
 
 def anim_karaoke(words, style, canvas_w, canvas_h) -> list[str]:
-    """Фраза целиком; текущее слово подсвечивается (\\k)."""
+    """Фраза целиком; текущее слово подсвечивается (\\k). Ключевые слова — ярким цветом."""
     cx, cy = _cx(canvas_w), _cy(style, canvas_h)
+    hl_on = style.highlight_mode != "none"
+    key_col = ass_color(style.key_color if style.highlight_mode == "color"
+                        else style.key_fill, 1.0)
+    base_col = ass_color(style.primary, 1.0)
     out = []
     for phrase in group_phrases(words):
         p_start = phrase[0].start
@@ -233,9 +283,97 @@ def anim_karaoke(words, style, canvas_w, canvas_h) -> list[str]:
             # Длительность слога в сотых секунды.
             nxt = phrase[j + 1].start if j + 1 < len(phrase) else w.end
             k = max(1, int(round((nxt - w.start) * 100)))
-            parts.append(f"{{\\k{k}}}{_disp(w.text)} ")
+            disp = _disp(w.text)
+            # В караоке стиль на всю строку один, поэтому ключевое слово красим инлайном.
+            if hl_on and getattr(w, "key", False):
+                disp = f"{{\\c{key_col}}}{disp}{{\\c{base_col}}}"
+            parts.append(f"{{\\k{k}}}{disp} ")
         out.append(_dialogue(p_start, p_end, "".join(parts).rstrip()))
     return out
+
+
+# --------------------------------------------------------------------------
+# Авто-детект ударных (ключевых) слов для яркой подсветки
+# --------------------------------------------------------------------------
+
+# Частые служебные слова — их не подсвечиваем, даже если они длинные.
+_STOP: frozenset[str] = frozenset("""
+и а но да или что как это этот эта эти тот та те там тут вот же бы ли не ни
+в во на за под над при про от до из у к ко с со о об обо для по без через между
+я ты он она оно мы вы они меня тебя его ее нас вас их мне тебе ему ей нам вам им
+мой твой наш ваш свой себя себе кто где когда куда откуда почему зачем чтобы чтоб
+если будет было были быть есть был была уже еще так тоже также очень вообще
+тебе была этому эта того чего кого нибудь просто такой такая такие всё все весь
+""".split())
+
+
+def _kw_score(w) -> int:
+    """Оценка «весомости» слова для подсветки. 0 = не подсвечивать."""
+    raw = (w.text or "").strip()
+    if "*" in raw:                          # замаскированный мат — не подсвечиваем
+        return 0
+    clean = _clean(raw)
+    letters = [ch for ch in clean if ch.isalpha()]
+    n_let = len(letters)
+    low = clean.lower().replace("ё", "е")
+    if low in _STOP or n_let < 3:
+        return 0
+    score = 0
+    if raw.endswith(("!", "?", "!!", "?!", "!?", "…")):
+        score += 3                          # эмоция — восклицание/вопрос
+    if any(ch.isdigit() for ch in raw):
+        score += 3                          # число — «цепляет» (стата)
+    if n_let >= 2 and clean.upper() == clean and clean.lower() != clean:
+        score += 2                          # КАПС — «кричит»
+    if n_let >= 8:
+        score += 3                          # длинное/весомое слово
+    elif n_let >= 6:
+        score += 2
+    elif n_let >= 4:
+        score += 1
+    return score
+
+
+def mark_keywords(words: list, max_ratio: float = 0.45) -> int:
+    """Пометить «ударные» слова (`w.key = True`) эвристикой — для яркой подсветки.
+
+    Подход «одно ключевое на фразу»: речь бьётся на короткие фразы, в каждой
+    подсвечивается самое весомое слово (эмоция/число/КАПС/длинное). Так плотность
+    получается естественной (≈ одно слово на фразу) на любой речи, кадр не пестрит.
+    Служебные слова и замаскированный мат не подсвечиваем; два ключевых подряд — нет.
+
+    Возвращает число подсвеченных слов. Пользователь потом может править вручную.
+    """
+    for w in words:
+        w.key = False
+    n = len(words)
+    if n == 0:
+        return 0
+    idx_of = {id(w): i for i, w in enumerate(words)}
+    chosen: set[int] = set()
+    cap = max(1, int(round(n * max_ratio)))
+
+    for phrase in group_phrases(words, max_words=4, max_gap=0.6, max_span=2.5):
+        best_i, best_s = None, 0
+        for w in phrase:
+            s = _kw_score(w)
+            if s > best_s:
+                best_s, best_i = s, idx_of[id(w)]
+        if best_i is not None and best_s >= 1 and len(chosen) < cap:
+            if (best_i - 1) not in chosen and (best_i + 1) not in chosen:
+                chosen.add(best_i)
+
+    for i in chosen:
+        words[i].key = True
+    log.info("Ключевых слов подсвечено: %d из %d", len(chosen), n)
+    return len(chosen)
+
+
+def apply_key_overrides(words: list, overrides: dict) -> None:
+    """Ручная правка подсветки из UI: {индекс слова: True/False} поверх авто-детекта."""
+    for i, val in (overrides or {}).items():
+        if 0 <= int(i) < len(words):
+            words[int(i)].key = bool(val)
 
 
 AnimationFn = Callable[[list, CaptionStyle, int, int], list[str]]
@@ -291,6 +429,8 @@ def _main() -> None:
     ap.add_argument("--anim", choices=[a.value for a in CaptionAnimation], default="pop")
     ap.add_argument("--out", default="out/subs.ass")
     ap.add_argument("--box", action="store_true", help="фон-плашка под текстом")
+    ap.add_argument("--highlight", choices=["box", "color", "none"], default="none",
+                    help="яркая подсветка ключевых слов")
     ap.add_argument("--burn", help="видео для прожига субтитров (тест libass/кириллицы)")
     ap.add_argument("--burn-out", default="out/captioned.mp4")
     args = ap.parse_args()
@@ -298,12 +438,15 @@ def _main() -> None:
     class _W:
         def __init__(self, d):
             self.text = d["text"]; self.start = d["start"]; self.end = d["end"]
+            self.key = False
 
     with open(args.transcript_json, encoding="utf-8") as f:
         data = json.load(f)
     words = [_W(d) for d in data["words"]]
 
-    style = CaptionStyle(box=args.box)
+    style = CaptionStyle(box=args.box, highlight_mode=args.highlight)
+    if args.highlight != "none":
+        mark_keywords(words)
     write_ass(args.out, words, style=style, animation=CaptionAnimation(args.anim))
 
     if args.burn:

@@ -46,6 +46,28 @@ def _gate_expr(intervals: list[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in intervals)
 
 
+def _enhance_chain(denoise: bool, clarity: bool, gate: bool,
+                   denoise_strength: float = 12.0) -> list[str]:
+    """Фильтры «продвинутого звука», применяемые к итогу до loudnorm.
+
+    denoise  — FFT-шумодав (afftdn): убирает ровный фон/шипение (сила в дБ).
+    clarity  — чёткость голоса: срез низкого гула (highpass) + лёгкий подъём
+               «присутствия» (~3 кГц), голос звонче без «бубнежа».
+    gate     — шумовой гейт (agate): в паузах приглушает тихий фон, чтоб не шипело.
+    Порядок: шумодав → гейт → эквалайзер (сначала чистим, потом красим).
+    """
+    chain: list[str] = []
+    if denoise:
+        chain.append(f"afftdn=nr={max(1.0, denoise_strength):.1f}:nf=-25")
+    if gate:
+        # Мягкий гейт: тихое (ниже порога) приглушается, речь проходит.
+        chain.append("agate=threshold=0.03:ratio=2:attack=5:release=120")
+    if clarity:
+        chain.append("highpass=f=85")
+        chain.append("equalizer=f=3000:t=q:w=1.2:g=2.5")
+    return chain
+
+
 def build_audio_filter(
     intervals: list[tuple[float, float]],
     src_label: str = "0:a",
@@ -53,24 +75,28 @@ def build_audio_filter(
     out_label: str = "aout",
     loudnorm: bool = True,
     mode: str = "beep",           # 'beep' (тон 1 кГц) | 'silence' (заглушить)
+    denoise: bool = False,        # продвинутый звук: FFT-шумодав
+    clarity: bool = False,        # продвинутый звук: чёткость голоса (EQ)
+    gate: bool = False,           # продвинутый звук: шумовой гейт
     I: float = LOUDNORM_I,
     TP: float = LOUDNORM_TP,
     LRA: float = LOUDNORM_LRA,
 ) -> list[str]:
     """Построить фрагмент аудио-графа.
 
-    intervals пуст → только нормализация. Иначе на интервалах глушим оригинал и,
-    если mode='beep', подмешиваем гейтованный тон (tone_label); mode='silence' —
-    просто тишина (тон не нужен, доп. вход sine не требуется).
+    intervals пуст → только (опц.) улучшение + нормализация. Иначе на интервалах глушим
+    оригинал и, если mode='beep', подмешиваем гейтованный тон (tone_label); mode='silence'
+    — просто тишина. Улучшения звука (denoise/clarity/gate) идут к суммарному сигналу
+    ПОСЛЕ подмешивания бипа, но ДО loudnorm (чистим сигнал, затем нормализуем громкость).
     """
     fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
     filters: list[str] = []
 
     if intervals:
-        gate = _gate_expr(intervals)
-        filters.append(f"[{src_label}]{fmt},volume=volume='if({gate},0,1)':eval=frame[a_voice]")
+        gate_expr = _gate_expr(intervals)
+        filters.append(f"[{src_label}]{fmt},volume=volume='if({gate_expr},0,1)':eval=frame[a_voice]")
         if mode == "beep":
-            filters.append(f"[{tone_label}]{fmt},volume=volume='if({gate},1,0)':eval=frame[a_beep]")
+            filters.append(f"[{tone_label}]{fmt},volume=volume='if({gate_expr},1,0)':eval=frame[a_beep]")
             # duration=first — длину задаёт голос, иначе бесконечный sine → вечный рендер.
             filters.append(f"[a_voice][a_beep]amix=inputs=2:normalize=0:duration=first[a_sum]")
         else:  # silence
@@ -79,6 +105,12 @@ def build_audio_filter(
     else:
         filters.append(f"[{src_label}]{fmt}[a_sum]")
         cur = "a_sum"
+
+    # Продвинутый звук (шумодав/чёткость/гейт) — к суммарному сигналу до нормализации.
+    enh = _enhance_chain(denoise, clarity, gate)
+    if enh:
+        filters.append(f"[{cur}]{','.join(enh)}[a_enh]")
+        cur = "a_enh"
 
     if loudnorm:
         # ГРАБЛЯ: фильтр loudnorm внутри РЕСЕМПЛИТ звук до 192 кГц и отдаёт его
