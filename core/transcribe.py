@@ -52,6 +52,7 @@ class Word:
     end: float
     text: str             # слово с ведущим пробелом от Whisper — храним очищенным
     prob: float = 1.0     # вероятность (уверенность) слова 0..1
+    key: bool = False     # «ударное» слово — подсветить ярко (см. captions.mark_keywords)
 
 
 @dataclass

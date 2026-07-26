@@ -42,6 +42,9 @@ binaries += collect_dynamic_libs("onnxruntime")
 
 hiddenimports = ["ctranslate2", "av", "onnxruntime", "tokenizers", "huggingface_hub"]
 hiddenimports += collect_submodules("faster_whisper")
+# Бот меток и вход через Twitch импортируются лениво (внутри функций UI) — называем
+# их явно, чтобы PyInstaller точно положил их в сборку.
+hiddenimports += ["core.chatbot", "core.twitch_auth", "core.autostart"]
 
 # Не тащим CUDA (докачивается) и заведомо ненужные тяжёлые модули.
 excludes = [
