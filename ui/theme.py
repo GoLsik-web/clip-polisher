@@ -36,6 +36,21 @@ PALETTE = {
 }
 
 
+# Текущая тема приложения. Нужна виджетам, которые рисуют себя сами (тумблеры, чипы):
+# они создаются в разных местах и не всегда знают тему на момент создания.
+_CURRENT = "dark"
+
+
+def set_current(theme: str) -> None:
+    global _CURRENT
+    if theme in PALETTE:
+        _CURRENT = theme
+
+
+def current() -> str:
+    return _CURRENT
+
+
 def p(theme: str) -> dict:
     return PALETTE.get(theme, PALETTE["dark"])
 

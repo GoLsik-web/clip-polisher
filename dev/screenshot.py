@@ -108,6 +108,14 @@ def main():
         print("saved", os.path.join(OUT, f"loader_{int(frac*100)}.png"))
     win.loader.stop()
 
+    # Гасим фоновые потоки (в окне теперь живёт панель бота с проверкой входа),
+    # иначе процесс падает на выходе: «QThread: Destroyed while thread is still running».
+    try:
+        win.marks_panel.bot_panel.shutdown()
+    except AttributeError:
+        pass
+    win.close()
+    app.processEvents()
     print("DONE:", len(variants), "shots")
 
 

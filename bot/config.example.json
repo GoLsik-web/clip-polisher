@@ -1,0 +1,16 @@
+{
+  "channel": "ВАШ_КАНАЛ",
+  "bot_username": "ИМЯ_БОТА",
+  "bot_oauth": "oauth:ВАШ_ТОКЕН_ЧАТА",
+
+  "client_id": "",
+  "client_secret": "",
+
+  "commands": ["!clip", "!клип", "!метка"],
+  "who_can_mark": "all",
+  "viewer_cooldown_sec": 30,
+  "reply_in_chat": true,
+  "use_stream_start_as_zero": true,
+
+  "output": "bot/marks/<channel>_<date>.clipmarks"
+}

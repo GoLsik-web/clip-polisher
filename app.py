@@ -47,6 +47,16 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Полировщик клипов")
 
+    # Иконка приложения (таскбар/Alt-Tab) — брендовый бургер, не дефолт винды.
+    try:
+        from PySide6.QtGui import QIcon
+        from core.resources import res
+        ico = res("assets/app.ico")
+        if os.path.isfile(ico):
+            app.setWindowIcon(QIcon(ico))
+    except Exception:  # noqa: BLE001
+        pass
+
     # Регистрируем PT Sans (на чужом ПК его может не быть — иначе UI на фолбэк-шрифте).
     try:
         from PySide6.QtGui import QFontDatabase, QFont
@@ -61,7 +71,13 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
     win = MainWindow()
-    win.show()
+    # Запуск из автозапуска Windows (--tray): окно не показываем, живём значком у
+    # часов — автопилот бота при этом работает.
+    from core import autostart
+    if autostart.started_in_tray() and getattr(win, "_tray", None):
+        win.hide_to_tray(message=True)
+    else:
+        win.show()
     return app.exec()
 
 
