@@ -109,6 +109,8 @@ def build_layout_filtergraph(
         return _preset_fullface(layout, canvas_w, canvas_h, in_label, out_label, tag)
     if p == LayoutPreset.B:
         return _preset_pip_circle(layout, canvas_w, canvas_h, in_label, out_label, tag)
+    if p == LayoutPreset.E:
+        return _preset_gameplay_only(layout, canvas_w, canvas_h, in_label, out_label, tag)
     raise ValueError(f"Неизвестный пресет раскладки: {p}")
 
 
@@ -144,6 +146,13 @@ def _preset_fullface(layout, canvas_w, canvas_h, in_label, out_label, tag) -> li
     """Пресет C: вебка (лицо) на весь экран 9:16."""
     return [
         f"[{in_label}]{_cover(layout.webcam_zone, canvas_w, canvas_h)}[{out_label}]"
+    ]
+
+
+def _preset_gameplay_only(layout, canvas_w, canvas_h, in_label, out_label, tag) -> list[str]:
+    """Пресет E: у стримера нет вебки — на весь экран идёт только геймплей."""
+    return [
+        f"[{in_label}]{_cover(layout.gameplay_zone, canvas_w, canvas_h)}[{out_label}]"
     ]
 
 

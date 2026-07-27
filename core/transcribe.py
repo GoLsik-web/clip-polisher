@@ -174,6 +174,7 @@ def transcribe_file(
     beam_size: int = 5,
     initial_prompt: Optional[str] = None,
     denoise: bool = True,
+    quality: str = "best",
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> TranscriptResult:
     """Расшифровать аудио файла (mp4/wav/...) со словными таймкодами.
@@ -204,13 +205,23 @@ def transcribe_file(
     # не режем короткие паузы слишком агрессивно.
     vad_params = dict(threshold=0.35, min_silence_duration_ms=500,
                       speech_pad_ms=250, min_speech_duration_ms=0)
+
+    # Два режима качества. 'best' — для готового клипа: точные словные тайминги нужны
+    # субтитрам и цензуре мата. 'fast' — для АВТОПОИСКА моментов (Этап 3): там важен
+    # смысл фразы, а не тайминг каждого слова, и таких кусков десятки. Широкий поиск
+    # там втрое дороже без всякой пользы.
+    fast = (quality == "fast")
+    dec = dict(word_timestamps=not fast,
+               beam_size=(1 if fast else beam_size),
+               best_of=(1 if fast else 5),
+               patience=(1 if fast else 2),
+               temperature=([0.0, 0.4] if fast else [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]))
+
     segments, info = model.transcribe(
         audio_path,
         language=language,
         task="transcribe",
-        word_timestamps=True,                 # словные таймкоды (нужны и для анти-галлюцинаций)
-        beam_size=beam_size, best_of=5, patience=2,   # шире поиск → точнее слова
-        temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],   # фолбэк при плохом декодировании
+        **dec,
         condition_on_previous_text=True,      # связность между сегментами
         no_repeat_ngram_size=3,               # меньше повторов-галлюцинаций
         repetition_penalty=1.05,
