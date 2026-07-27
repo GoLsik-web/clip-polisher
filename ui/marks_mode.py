@@ -95,6 +95,9 @@ class MarksTimeline(QWidget):
     PAD = 14
     HEAT_H = 34
     RULER_H = 18
+    # Что писать на пустой дорожке. Вынесено в атрибут класса: Этап 3 наследует этот
+    # виджет ради перетаскивания границ и линейки, но данные там другие (не метки).
+    EMPTY_TEXT = "Загрузите видео стрима и файл меток — здесь появится дорожка"
     moment_edited = Signal(int, float, float)   # (индекс, start, end) в сек стрима
     moment_clicked = Signal(int)
 
@@ -220,8 +223,7 @@ class MarksTimeline(QWidget):
 
         if self._dur <= 0:
             p.setPen(QColor(c["muted"]))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       "Загрузите видео стрима и файл меток — здесь появится дорожка")
+            p.drawText(self.rect(), Qt.AlignCenter, self.EMPTY_TEXT)
             return
 
         self._draw_heat(p, c)
@@ -604,7 +606,8 @@ class MarksModePanel(QWidget):
         s3, v3 = _section("РАСКЛАДКА", self._theme)
         v3.addWidget(self._muted_label(
             "Настрой раскладку и выключи ненужные панели во вкладке «Раскладка» справа "
-            "(пресеты A/B/C/D + ручное перетаскивание зон, как в обычном режиме)."))
+            "(пресеты A–E, включая «без вебки», + ручное перетаскивание зон, "
+            "как в обычном режиме)."))
         col.addWidget(s3)
 
         # --- Звук ---

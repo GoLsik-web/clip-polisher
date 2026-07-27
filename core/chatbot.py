@@ -25,6 +25,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from core.banter import Banter, DEFAULT_MODE, build_report, is_report_command
+from core.chatpulse import PulseCollector, pulse_path_for
 from core.marks import Mark, MarksFile, AuthorType
 
 IRC_HOST = "irc.chat.twitch.tv"
@@ -426,6 +428,10 @@ class BotService:
                  who_can_mark: str = "all", viewer_cooldown_sec: float = 30.0,
                  reply_in_chat: bool = True, use_stream_start_as_zero: bool = True,
                  autopilot: bool = False, watch_period: float = 60.0,
+                 write_pulse: bool = True, banter_mode: str = DEFAULT_MODE,
+                 banter_period_min: float = 12.0, greet_newcomers: bool = True,
+                 react_to_hype: bool = True, banter: Optional[Banter] = None,
+                 tick_period: float = 5.0,
                  on_event: Optional[Callable[[str, dict], None]] = None):
         self.channel = channel.strip().lstrip("#").lower()
         self.token = token
@@ -435,17 +441,25 @@ class BotService:
         self.reply_in_chat = reply_in_chat
         self.autopilot = autopilot
         self.watch_period = watch_period
+        self.write_pulse = write_pulse
+        self.tick_period = tick_period
         self.on_event = on_event or (lambda _k, _p: None)
+        self.banter = banter or Banter(mode=banter_mode, period_min=banter_period_min,
+                                       greet_newcomers=greet_newcomers,
+                                       react_to_hype=react_to_hype)
         self._collector_opts = {"commands": commands, "who_can_mark": who_can_mark,
                                 "viewer_cooldown_sec": viewer_cooldown_sec}
         self.collector = self._new_collector(StreamInfo(live=False))
+        self.pulse = self._new_pulse(self.collector)
         self.stream = StreamInfo(live=False)
         self._stop = threading.Event()
         self._live = threading.Event()           # идёт ли эфир (для автопилота)
         self._chat: Optional[TwitchChat] = None
         self._thread: Optional[threading.Thread] = None
+        self._ticker: Optional[threading.Thread] = None
         self._watcher: Optional[StreamWatcher] = None
         self._lock = threading.Lock()
+        self._last_report = 0.0
 
     # ---- сессии эфиров ----
     def _new_collector(self, info: StreamInfo) -> MarkCollector:
@@ -462,19 +476,42 @@ class BotService:
                              broadcast_id=info.broadcast_id, title=info.title,
                              game=info.game, **self._collector_opts)
 
+    def _new_pulse(self, col: MarkCollector) -> Optional[PulseCollector]:
+        """Журнал пульса чата — рядом с файлом меток, с тем же нулём времени.
+
+        Это НЕВИДИМЫЙ файл: в чат из него ничего не уходит, он нужен разбору стрима
+        (Этап 3), чтобы знать, где чат взрывался.
+        """
+        if not self.write_pulse:
+            return None
+        return PulseCollector(channel=self.channel, output_path=pulse_path_for(col.output_path),
+                              ref_epoch=col.ref_epoch, broadcast_id=col.broadcast_id,
+                              started_at=col._started_iso)
+
     def _begin_session(self, info: StreamInfo) -> None:
         """Начать новую сессию: эфир начался или сразу сменился следующим."""
         with self._lock:
-            old = self.collector
+            old, old_pulse = self.collector, self.pulse
             new = self._new_collector(info)
             new.set_online(info.viewers if info.live else None)
             resumed = new.resume_existing()      # перезапуск посреди стрима — дописываем
+            new_pulse = self._new_pulse(new)
+            if new_pulse is not None:
+                new_pulse.resume_existing()
             self.collector = new
-        if old is not None and old.marks and old.output_path != new.output_path:
-            try:
-                old.finalize()                   # прошлый файл закрываем как есть
-            except OSError:
-                pass
+            self.pulse = new_pulse
+        if old is not None and old.output_path != new.output_path:
+            if old.marks:
+                try:
+                    old.finalize()               # прошлый файл закрываем как есть
+                except OSError:
+                    pass
+            if old_pulse is not None and old_pulse is not new_pulse and old_pulse.has_data:
+                try:
+                    old_pulse.finalize()
+                except OSError:
+                    pass
+        self.banter.reset_session()              # новый эфир — знакомимся со зрителями заново
         self._emit("session", {"path": new.output_path, "live": info.live,
                                "title": info.title, "game": info.game,
                                "broadcast_id": info.broadcast_id,
@@ -486,11 +523,16 @@ class BotService:
 
     def _end_session(self) -> None:
         with self._lock:
-            col = self.collector
+            col, pulse = self.collector, self.pulse
         try:
             col.finalize()
         except OSError as e:
             self._emit("log", {"text": f"не смог дописать файл меток: {e}"})
+        if pulse is not None and pulse.has_data:
+            try:
+                pulse.finalize()
+            except OSError as e:
+                self._emit("log", {"text": f"не смог дописать журнал чата: {e}"})
 
     # ---- управление ----
     def start(self) -> None:
@@ -502,6 +544,9 @@ class BotService:
         self._watcher.start()
         self._thread = threading.Thread(target=self._run, daemon=True, name="clipbot-chat")
         self._thread.start()
+        self._ticker = threading.Thread(target=self._tick_loop, daemon=True,
+                                        name="clipbot-tick")
+        self._ticker.start()
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
@@ -511,6 +556,8 @@ class BotService:
             self._chat.stop()
         if self._thread:
             self._thread.join(timeout=timeout)
+        if self._ticker:
+            self._ticker.join(timeout=timeout)
         self._end_session()
         self._emit("status", {"text": "Бот остановлен", "running": False})
 
@@ -535,6 +582,10 @@ class BotService:
     @property
     def output_path(self) -> str:
         return self.collector.output_path
+
+    @property
+    def pulse_path(self) -> str:
+        return self.pulse.output_path if self.pulse is not None else ""
 
     # ---- события эфира ----
     def _on_stream(self, info: StreamInfo) -> None:
@@ -568,18 +619,110 @@ class BotService:
         except Exception:            # noqa: BLE001 — колбэк UI не должен ронять бота
             pass
 
-    def _on_message(self, tags: dict, login: str, text: str) -> None:
-        col = self.collector
-        reply = col.handle_message(login, tags, text)
-        if not reply:
+    def _say(self, text: str, announce: bool = True) -> None:
+        """Сказать что-то в чат от лица бота.
+
+        `announce=False` — для подтверждения метки: она уже показана в журнале UI
+        отдельной строкой, второй раз её печатать незачем.
+        """
+        if not text:
             return
-        role = role_from_tags(login, self.channel, tags)
-        mark = col.marks[-1]
-        self._emit("mark", {"n": len(col.marks), "t": mark.t, "author": mark.author,
-                            "role": role.value, "note": mark.note,
-                            "path": col.output_path, "live": self.stream.live})
         if self._chat:
-            self._chat.reply(reply)
+            self._chat.reply(text)
+        self.banter.note_sent()          # любая наша реплика сдвигает кулдаун болталки
+        if announce:
+            self._emit("say", {"text": text})
+
+    def _on_message(self, tags: dict, login: str, text: str) -> None:
+        now = time.time()
+        report = is_report_command(text)
+
+        # Под тем же замком, что и смена сессии: иначе метка могла уйти в СТАРЫЙ
+        # сборщик, а новый следом переписал бы файл эфира без неё (метка терялась).
+        with self._lock:
+            col, pulse = self.collector, self.pulse
+            if pulse is not None:
+                pulse.feed(login, text, now)          # пульс копит ЛЮБОЕ сообщение
+            reply = None if report else col.handle_message(login, tags, text, now)
+            mark = col.marks[-1] if reply else None
+            total, path = len(col.marks), col.output_path
+
+        if report:
+            self._on_report(tags, login, now, col, pulse)
+            return
+
+        if reply and mark is not None:
+            role = role_from_tags(login, self.channel, tags)
+            self._emit("mark", {"n": total, "t": mark.t, "author": mark.author,
+                                "role": role.value, "note": mark.note,
+                                "path": path, "live": self.stream.live})
+            self._say(reply, announce=False)
+            return
+
+        # Поздороваться с тем, кто написал впервые за эфир.
+        rate = pulse.rate_per_min(now=now) if pulse is not None else 0.0
+        hello = self.banter.greet(login, tags.get("display-name") or login,
+                                  rate_per_min=rate, now=now)
+        if hello:
+            self._say(hello)
+
+    def _on_report(self, tags: dict, login: str, now: float,
+                   col: MarkCollector, pulse) -> None:
+        """Команда !отчёт: сводка эфира в чат. Доступ — стример и модераторы."""
+        role = role_from_tags(login, self.channel, tags)
+        if role not in (AuthorType.STREAMER, AuthorType.MODERATOR):
+            return
+        if (now - self._last_report) < 60.0:
+            return
+        self._last_report = now
+
+        peak_ratio, peak_t, rate, chatters = 0.0, None, 0.0, 0
+        if pulse is not None:
+            rate = pulse.rate_per_min(now=now)
+            chatters = pulse.last_bucket.u if pulse.last_bucket else 0
+            from core.chatpulse import find_spikes
+            spikes = find_spikes(pulse.as_log())
+            if spikes:
+                best = max(spikes, key=lambda s: s.ratio)
+                peak_ratio, peak_t = best.ratio, best.center
+        text = build_report(uptime_sec=max(0.0, now - col.ref_epoch), marks=len(col.marks),
+                            rate_per_min=rate, live=self.stream.live,
+                            peak_ratio=peak_ratio, peak_t=peak_t, chatters=chatters)
+        self._say(text)                  # в журнале UI видно ровно то, что ушло в чат
+        self._emit("report", {"text": text})
+
+    def _tick_loop(self) -> None:
+        """Фоновый тик: закрывает корзины пульса, пишет журнал, даёт слово болталке."""
+        while not self._stop.wait(self.tick_period):
+            now = time.time()
+            try:
+                closed = self.pulse.tick(now) if self.pulse is not None else []
+            except OSError as e:
+                closed = []
+                self._emit("log", {"text": f"журнал чата не пишется: {e}"})
+            if not self._chat:
+                continue                      # в чате нас нет — говорить некуда
+            try:
+                # Взрыв чата — поддержать волну.
+                if closed and self.pulse is not None:
+                    ratio = self.pulse.live_ratio(now)
+                    said = self.banter.hype(ratio, now)
+                    if said:
+                        self._say(said)
+                        continue
+                # Чат затих — расшевелить.
+                silence = self.pulse.silence_sec(now) if self.pulse is not None else None
+                if silence is not None:
+                    said = self.banter.revive(silence, now)
+                    if said:
+                        self._say(said)
+                        continue
+                # Просто по таймеру.
+                said = self.banter.idle(now)
+                if said:
+                    self._say(said)
+            except OSError as e:                # noqa: BLE001 — болталка не роняет бота
+                self._emit("log", {"text": f"болталка: {e}"})
 
     def _run(self) -> None:
         delay = 5.0
