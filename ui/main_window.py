@@ -234,32 +234,18 @@ class MainWindow(QMainWindow):
         """Стек экранов по режимам бургер-меню (изоляция Этапа 2 от рабочего Этапа 1).
 
         Страница 0 — Twitch-клипы (мастер|редактор), 1 — «Метки через бота» (склейка),
-        2 — заглушка Автопоиск ИИ. Переключается из _on_mode_selected."""
+        2 — «Автопоиск моментов ИИ». Переключается из _on_mode_selected."""
         from PySide6.QtWidgets import QStackedWidget
+        from .scan_mode import ScanModePanel
         self._mode_stack = QStackedWidget()
         self._mode_stack.addWidget(self._workspace())          # стр. 0
         self.marks_panel = MarksModePanel(self._theme)         # стр. 1
         self.marks_panel.render_requested.connect(self._render_marks)
         self._mode_stack.addWidget(self.marks_panel)
-        self._mode_stack.addWidget(self._mode3_placeholder())  # стр. 2
+        self.scan_panel = ScanModePanel(self._theme)           # стр. 2
+        self.scan_panel.render_requested.connect(self._render_scan)
+        self._mode_stack.addWidget(self.scan_panel)
         return self._mode_stack
-
-    def _mode3_placeholder(self) -> QWidget:
-        from .theme import PALETTE
-        c = PALETTE[self._theme]
-        wrap = QWidget(); wl = QVBoxLayout(wrap); wl.addStretch(1)
-        card = QFrame(); card.setObjectName("card")
-        card.setMaximumWidth(520)
-        cl = QVBoxLayout(card); cl.setContentsMargins(28, 24, 28, 24); cl.setSpacing(8)
-        t = QLabel("Этап 3 · Автопоиск ИИ")
-        t.setStyleSheet("font-weight:800;font-size:18px;")
-        d = QLabel("Каркас режима готов. ИИ будет сам находить лучшие моменты по чату, "
-                   "звуку и речи — появится на Этапе 3.")
-        d.setWordWrap(True); d.setStyleSheet(f"color:{c['muted']};font-size:13px;")
-        cl.addWidget(t); cl.addWidget(d)
-        row = QHBoxLayout(); row.addStretch(1); row.addWidget(card); row.addStretch(1)
-        wl.addLayout(row); wl.addStretch(1)
-        return wrap
 
     def _workspace(self) -> QWidget:
         """Две колонки ФИКС-пропорции 35/65 (без дивайдера): мастер | редактор.
@@ -366,7 +352,18 @@ class MainWindow(QMainWindow):
     def _fill_step2(self, st) -> None:
         b = st.body_layout
         b.addWidget(self._lab("Пресеты раскладки", "Выбери схему — зоны встанут по местам, дальше подгони мышью."))
-        self.preset_chips = ChipRow(["A · Вебка сверху", "B · Кружок", "C · Лицо", "D · Вебка снизу"])
+        # E — для стримеров без камеры: вебка есть не у всех, и выключать её зону
+        # вручную каждый раз неудобно.
+        # Подписи короткие (пять длинных не влезали в колонку — последний чип
+        # обрезался), смысл — в подсказке при наведении.
+        self.preset_chips = ChipRow(["A · Сверху", "B · Кружок", "C · Лицо",
+                                     "D · Снизу", "E · Без вебки"])
+        self.preset_chips.set_tips([
+            "Вебка сверху, геймплей снизу",
+            "Геймплей на весь экран, вебка кружком в углу",
+            "Лицо на весь экран (для разговорных стримов)",
+            "Геймплей сверху, вебка снизу",
+            "У стримера нет вебки: геймплей на весь экран"])
         self.preset_chips.changed.connect(self._on_preset)
         b.addWidget(self.preset_chips)
         hint = QLabel("Тяни цветные зоны на «Альбомной» версии: перетаскивание — позиция, угол — масштаб.")
@@ -621,6 +618,9 @@ class MainWindow(QMainWindow):
         # Панель Этапа 2 (метки) — тема таймлайна/перерисовка.
         if hasattr(self, "marks_panel"):
             self.marks_panel.apply_theme(self._theme)
+        # Панель Этапа 3 (автопоиск) — то же самое.
+        if hasattr(self, "scan_panel"):
+            self.scan_panel.apply_theme(self._theme)
         # Если открыто окно обновлений — перекрасить и его под новую тему.
         dlg = getattr(self, "_updates_dialog", None)
         if dlg is not None:
@@ -664,6 +664,38 @@ class MainWindow(QMainWindow):
             return
         try:
             pcfgs = self.marks_panel.build_pipeline_configs(self._out_dir)
+        except Exception as ex:  # noqa: BLE001
+            QMessageBox.critical(self, "Ошибка конфигурации", str(ex))
+            return
+        if not pcfgs:
+            QMessageBox.warning(self, "Нечего рендерить", "Не набралось ни одного клипа.")
+            return
+        self.loader.start()
+        if len(pcfgs) == 1:
+            t = self._track(W.RenderThread(pcfgs[0]))
+            t.progress.connect(self.loader.set_progress)
+            t.finished_ok.connect(self._render_done)
+            t.failed.connect(self._render_fail)
+        else:
+            t = self._track(W.BatchRenderThread(pcfgs))
+            t.progress.connect(self.loader.set_progress)
+            t.finished_ok.connect(self._marks_batch_done)
+            t.failed.connect(self._render_fail)
+        t.start()
+
+    def _render_scan(self) -> None:
+        """Этап 3: нарезать клипы из моментов автопоиска.
+
+        Куски записи к этому моменту уже скачаны самой панелью (или источник —
+        локальный файл), поэтому здесь остаётся обычная очередь рендера."""
+        if not self._ready_to_render():
+            return
+        err = self.scan_panel.validate()
+        if err:
+            QMessageBox.warning(self, "Нельзя нарезать", err)
+            return
+        try:
+            pcfgs = self.scan_panel.build_pipeline_configs(self._out_dir)
         except Exception as ex:  # noqa: BLE001
             QMessageBox.critical(self, "Ошибка конфигурации", str(ex))
             return
@@ -1341,6 +1373,11 @@ class MainWindow(QMainWindow):
         try:
             self.marks_panel.bot_panel.shutdown()
         except Exception:       # noqa: BLE001 — на выходе не мешаем закрытию окна
+            pass
+        # Разбор стрима и загрузка кусков — тоже потоки, и очень долгие.
+        try:
+            self.scan_panel.shutdown()
+        except Exception:       # noqa: BLE001
             pass
         # Дождаться живых потоков, чтобы Qt не рушил их на выходе.
         for th in list(self._threads):

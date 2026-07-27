@@ -127,6 +127,12 @@ class ChipRow(QWidget):
             if ch.text().lower() == text.lower():
                 ch.setChecked(True)
 
+    def set_tips(self, tips: list[str]) -> None:
+        """Подсказки при наведении — чтобы короткая подпись чипа не теряла смысл."""
+        for ch, tip in zip(self._chips, tips):
+            if tip:
+                ch.setToolTip(tip)
+
     def set_accent(self, color: str) -> None:
         for ch in self._chips:
             ch.set_accent(color)

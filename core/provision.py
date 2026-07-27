@@ -64,6 +64,54 @@ def cuda_dir() -> str:
     return d
 
 
+# --- модель распознавания ЗВУКОВ (смех/крик/аплодисменты), Этап 3, блок 2 ---
+# YAMNet (AudioSet, 521 класс) в формате ONNX: 16 МБ, считается на процессоре
+# (5 минут звука ≈ 0,35 с), запускается уже вшитым onnxruntime — новых зависимостей
+# не появляется. В установщик НЕ кладём: качается один раз при первом разборе звука.
+YAMNET_URL = ("https://huggingface.co/camstack/camstack-models/resolve/main/"
+              "audioClassification/yamnet/onnx/camstack-yamnet.onnx")
+YAMNET_MIN_BYTES = 8 * 1024 * 1024      # страховка от обрезанной закачки
+
+
+def yamnet_path() -> str:
+    return os.path.join(models_dir(), "yamnet.onnx")
+
+
+def yamnet_ready() -> bool:
+    p = yamnet_path()
+    try:
+        return os.path.isfile(p) and os.path.getsize(p) > YAMNET_MIN_BYTES
+    except OSError:
+        return False
+
+
+def ensure_yamnet(on_progress: Optional[ProgressCb] = None) -> str:
+    """Скачать модель распознавания звуков (один раз). Вернуть путь к файлу."""
+    if yamnet_ready():
+        return yamnet_path()
+    if on_progress:
+        on_progress(0.0, "Скачиваю модель распознавания звуков (16 МБ, один раз)…")
+
+    last = {"pct": -25.0}
+
+    def cb(got: int, total: int) -> None:
+        if not (on_progress and total):
+            return
+        pct = got / total * 100.0
+        if pct - last["pct"] < 25.0 and got < total:
+            return                      # не сыпать строчкой на каждый мегабайт
+        last["pct"] = pct
+        on_progress(got / total, f"Модель звуков: {got / 1048576:.0f} из "
+                                 f"{total / 1048576:.0f} МБ")
+
+    _download(YAMNET_URL, yamnet_path(), cb)
+    if not yamnet_ready():
+        raise RuntimeError("модель звуков скачалась не полностью")
+    if on_progress:
+        on_progress(1.0, "Модель распознавания звуков готова")
+    return yamnet_path()
+
+
 # --------------------------------------------------------------------------
 # Проверки готовности
 # --------------------------------------------------------------------------

@@ -85,6 +85,11 @@ class BotThread(QThread):
             reply_in_chat=self.opts.get("reply", True),
             use_stream_start_as_zero=self.opts.get("zero_at_start", True),
             autopilot=self.opts.get("autopilot", False),
+            write_pulse=self.opts.get("write_pulse", True),
+            banter_mode=self.opts.get("banter_mode", "off"),
+            banter_period_min=self.opts.get("banter_period_min", 12),
+            greet_newcomers=self.opts.get("greet_newcomers", True),
+            react_to_hype=self.opts.get("react_to_hype", True),
             on_event=lambda k, p: self.event.emit(k, p))
         self.svc.start()
         # Ждём, пока бот жив (или пока его не остановят снаружи).
@@ -124,6 +129,7 @@ class BotPanel(QWidget):
         self._bot_thread: Optional[BotThread] = None
         self._account: Optional[dict] = None
         self._marks_path = ""
+        self._steppers: list[QPushButton] = []      # кнопки «−/+» — красим при смене темы
         self._settings = QSettings("ClipPolisher", "Bot")
         self._build()
         self._load_settings()
@@ -141,6 +147,7 @@ class BotPanel(QWidget):
 
         col.addWidget(self._account_card())
         col.addWidget(self._bot_card())
+        col.addWidget(self._banter_card())
         col.addWidget(self._autostart_card())
         col.addWidget(self._marks_card(), 1)
         scroll.setWidget(inner)
@@ -180,6 +187,47 @@ class BotPanel(QWidget):
         sw = ToggleSwitch(); sw.setChecked(on)
         l.addWidget(lab); l.addStretch(1); l.addWidget(sw)
         return w, sw
+
+    def _stepper(self, spin: QSpinBox, width: int = 74) -> QWidget:
+        """Числовое поле с кнопками «−» и «+» вместо крошечных стрелок Qt.
+
+        Родные стрелки в QSS выходили то квадратами, то вовсе невидимыми, да и
+        попасть по ним мышкой трудно. Свои кнопки рисуются одинаково в обеих темах
+        и нажимаются спокойно.
+        """
+        spin.setButtonSymbols(QSpinBox.NoButtons)
+        spin.setAlignment(Qt.AlignCenter)
+        spin.setFixedWidth(width)
+
+        box = QWidget()
+        lay = QHBoxLayout(box); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        # «–» (короткое тире) вместо дефиса: дефис рисуется мелким и висит высоко.
+        minus, plus = self._step_btn("–"), self._step_btn("+")
+        minus.clicked.connect(spin.stepDown)
+        plus.clicked.connect(spin.stepUp)
+        lay.addWidget(minus); lay.addWidget(spin); lay.addWidget(plus); lay.addStretch(1)
+        return box
+
+    def _step_btn(self, text: str) -> QPushButton:
+        b = QPushButton(text)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setFixedSize(30, 30)
+        b.setAutoRepeat(True)                # зажал — крутится, как у обычных стрелок
+        b.setAutoRepeatDelay(400); b.setAutoRepeatInterval(90)
+        b.setProperty("stepper", True)
+        self._style_step_btn(b)
+        self._steppers.append(b)
+        return b
+
+    def _style_step_btn(self, b: QPushButton) -> None:
+        c = PALETTE[self._theme]
+        b.setStyleSheet(
+            f"QPushButton{{background:{c['panel2']};border:1px solid {c['line']};"
+            f"border-radius:8px;color:{c['text']};font-size:16px;font-weight:800;"
+            f"padding:0;}}"
+            f"QPushButton:hover{{border-color:{c['accent']};color:{c['accent']};}}"
+            f"QPushButton:pressed{{background:{c['accent']};color:#fff;"
+            f"border-color:{c['accent']};}}")
 
     def _primary(self, text: str) -> QPushButton:
         c = PALETTE[self._theme]
@@ -280,9 +328,8 @@ class BotPanel(QWidget):
 
         self.cooldown_spin = QSpinBox(); self.cooldown_spin.setRange(0, 600)
         self.cooldown_spin.setValue(30); self.cooldown_spin.setSuffix(" с")
-        self.cooldown_spin.setFixedWidth(90)
         self.cooldown_spin.setToolTip("Чтобы один зритель не мог засыпать чат метками")
-        form.addRow(self._form_label("Пауза для зрителя"), self.cooldown_spin)
+        form.addRow(self._form_label("Пауза для зрителя"), self._stepper(self.cooldown_spin))
         v.addLayout(form)
 
         # Без «галочки» в тексте: в PT Sans такого символа нет — вылезал бы пустой квадрат.
@@ -331,6 +378,64 @@ class BotPanel(QWidget):
             self._bot_thread.connect_now()
             self.test_btn.setVisible(False)
             self._log_line("Проверка без эфира: захожу в чат")
+
+    # ---- карточка болталки ----
+    def _banter_card(self) -> QFrame:
+        """Что бот ГОВОРИТ в чат (не путать с журналом чата — тот невидимый)."""
+        from core.banter import MODES
+        card, v = self._card("БОТ ОБЩАЕТСЯ В ЧАТЕ")
+        v.addWidget(self._muted(
+            "Бот может не только молча ставить метки, но и подавать голос: подбадривать "
+            "зрителей, хвалить, шутить. Фразы он берёт из выбранной пачки и не "
+            "повторяется, пока она не кончится."))
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10); form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self.banter_combo = QComboBox()
+        for _code, title in MODES:
+            self.banter_combo.addItem(title)
+        self.banter_combo.currentIndexChanged.connect(self._on_banter_changed)
+        form.addRow(self._form_label("Настроение"), self.banter_combo)
+
+        self.banter_spin = QSpinBox(); self.banter_spin.setRange(1, 120)
+        self.banter_spin.setValue(12); self.banter_spin.setSuffix(" мин")
+        self.banter_spin.setToolTip("Как часто бот подаёт голос просто так")
+        self.banter_spin.valueChanged.connect(lambda _v: self._on_banter_changed())
+        form.addRow(self._form_label("Раз в"), self._stepper(self.banter_spin))
+        v.addLayout(form)
+
+        row, self.greet_sw = self._switch_row(
+            "Здороваться с новичками", on=True,
+            tip="Только с теми, кто написал впервые за эфир. В шумном чате бот молчит")
+        self.greet_sw.toggled.connect(lambda _o: self._on_banter_changed())
+        v.addWidget(row)
+        row, self.hype_sw = self._switch_row(
+            "Отзываться, когда чат взорвался", on=True,
+            tip="Если чат вдруг заговорил втрое активнее обычного")
+        self.hype_sw.toggled.connect(lambda _o: self._on_banter_changed())
+        v.addWidget(row)
+
+        self.banter_hint = self._muted(
+            "Команда !отчёт (только стример и модеры) — бот пришлёт в чат сводку эфира: "
+            "сколько идёт, сколько меток, насколько живой чат.")
+        v.addWidget(self.banter_hint)
+        return card
+
+    def _on_banter_changed(self) -> None:
+        """Настройки болталки применяются на лету — бота перезапускать не нужно."""
+        from core.banter import MODE_CODES
+        self._save_settings()
+        svc = getattr(self._bot_thread, "svc", None) if self._bot_thread else None
+        if svc is None:
+            return
+        idx = max(0, min(self.banter_combo.currentIndex(), len(MODE_CODES) - 1))
+        svc.banter.configure(mode=MODE_CODES[idx], period_min=self.banter_spin.value(),
+                             greet_newcomers=self.greet_sw.isChecked(),
+                             react_to_hype=self.hype_sw.isChecked())
 
     # ---- карточка автозапуска ----
     def _autostart_card(self) -> QFrame:
@@ -384,6 +489,17 @@ class BotPanel(QWidget):
             f"padding:8px 10px;color:{c['muted']};font-size:11px;")
         v.addWidget(self.session_lbl)
 
+        # Журнал чата — НЕВИДИМЫЙ файл рядом с метками (сырьё для автопоиска моментов).
+        # В чат из него ничего не уходит, поэтому он и живёт здесь, а не в болталке.
+        row, self.pulse_sw = self._switch_row(
+            "Вести журнал чата (для автопоиска моментов)", on=True,
+            tip="Раз в 10 секунд записывает, сколько было сообщений и смеха. "
+                "Файл лежит рядом с метками, в чат ничего не пишется")
+        v.addWidget(row)
+        v.addWidget(self._muted(
+            "По этому журналу программа потом сама находит места, где чат взорвался, — "
+            "и объясняет, почему выбрала момент. Никакие тексты зрителей не сохраняются."))
+
         hrow = QHBoxLayout()
         self.count_lbl = QLabel("Меток: 0")
         self.count_lbl.setStyleSheet(f"color:{c['text']};font-size:13px;font-weight:800;")
@@ -420,6 +536,15 @@ class BotPanel(QWidget):
         self.reply_sw.setChecked(s.value("reply", True, bool))
         self.auto_sw.setChecked(s.value("autopilot", True, bool))
         self.auto_hint.setVisible(self.auto_sw.isChecked())
+        from core.banter import MODE_CODES
+        mode = s.value("banter_mode", "off", str)
+        self.banter_combo.blockSignals(True)
+        self.banter_combo.setCurrentIndex(MODE_CODES.index(mode) if mode in MODE_CODES else 0)
+        self.banter_combo.blockSignals(False)
+        self.banter_spin.setValue(int(s.value("banter_period", 12)))
+        self.greet_sw.setChecked(s.value("banter_greet", True, bool))
+        self.hype_sw.setChecked(s.value("banter_hype", True, bool))
+        self.pulse_sw.setChecked(s.value("write_pulse", True, bool))
         self.tray_sw.setChecked(s.value("tray_on_close", True, bool))
         # Состояние автозапуска берём из самой Windows, а не из своих настроек:
         # его могли снять снаружи (диспетчер задач, чистилки).
@@ -437,6 +562,13 @@ class BotPanel(QWidget):
         s.setValue("cooldown", self.cooldown_spin.value())
         s.setValue("reply", self.reply_sw.isChecked())
         s.setValue("autopilot", self.auto_sw.isChecked())
+        from core.banter import MODE_CODES
+        idx = max(0, min(self.banter_combo.currentIndex(), len(MODE_CODES) - 1))
+        s.setValue("banter_mode", MODE_CODES[idx])
+        s.setValue("banter_period", self.banter_spin.value())
+        s.setValue("banter_greet", self.greet_sw.isChecked())
+        s.setValue("banter_hype", self.hype_sw.isChecked())
+        s.setValue("write_pulse", self.pulse_sw.isChecked())
 
     # ================= вход =================
     def _refresh_account(self) -> None:
@@ -454,6 +586,8 @@ class BotPanel(QWidget):
         self._theme = theme
         for sw in self.findChildren(ToggleSwitch):
             sw.set_theme(theme)
+        for b in self._steppers:                 # кнопки «−/+» тоже живут на инлайн-стиле
+            self._style_step_btn(b)
 
     @property
     def bot_running(self) -> bool:
@@ -557,10 +691,16 @@ class BotPanel(QWidget):
             self._set_status("Сначала войди через Twitch", DOT_WARN)
             return
         auto = self.auto_sw.isChecked()
+        from core.banter import MODE_CODES
+        bidx = max(0, min(self.banter_combo.currentIndex(), len(MODE_CODES) - 1))
         opts = {"who_can_mark": "all" if self.who_combo.currentIndex() == 0 else "trusted",
                 "cooldown": self.cooldown_spin.value(),
                 "reply": self.reply_sw.isChecked(), "zero_at_start": True,
-                "autopilot": auto}
+                "autopilot": auto, "write_pulse": self.pulse_sw.isChecked(),
+                "banter_mode": MODE_CODES[bidx],
+                "banter_period_min": self.banter_spin.value(),
+                "greet_newcomers": self.greet_sw.isChecked(),
+                "react_to_hype": self.hype_sw.isChecked()}
         self._save_settings()
         self._bot_thread = BotThread(channel, self._account["token"],
                                      self._account["login"], opts, self)
@@ -623,6 +763,9 @@ class BotPanel(QWidget):
             if p.get("relogin"):
                 self._on_account({})
             self._stop_bot()
+        elif kind == "say":
+            # Что бот сказал в чат — видно в том же журнале, чтобы не гадать.
+            self._log_line("бот: " + p.get("text", ""))
         elif kind == "log":
             self._log_line(p.get("text", ""))
 

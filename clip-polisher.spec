@@ -45,6 +45,12 @@ hiddenimports += collect_submodules("faster_whisper")
 # Бот меток и вход через Twitch импортируются лениво (внутри функций UI) — называем
 # их явно, чтобы PyInstaller точно положил их в сборку.
 hiddenimports += ["core.chatbot", "core.twitch_auth", "core.autostart"]
+# Этап 3 (автопоиск моментов): тоже импортируются лениво, внутри функций.
+# yt_dlp нужен целиком — им качается звуковая дорожка записи.
+hiddenimports += ["core.clipscan", "core.scanner", "core.media", "core.sound_events",
+                  "core.speech", "core.chatpulse", "core.banter", "core.twitch_clips",
+                  "core.vodcut", "ui.scan_mode"]
+hiddenimports += collect_submodules("yt_dlp")
 
 # Не тащим CUDA (докачивается) и заведомо ненужные тяжёлые модули.
 excludes = [

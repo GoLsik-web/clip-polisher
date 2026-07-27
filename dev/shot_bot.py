@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QFontDatabase           # noqa: E402
-from PySide6.QtWidgets import QApplication        # noqa: E402
+from PySide6.QtWidgets import QApplication, QScrollArea   # noqa: E402
 
 from ui.bot_panel import BotPanel                 # noqa: E402
 
@@ -93,6 +93,16 @@ def main() -> None:
                                     "live": False, "marks": 0})
         app.processEvents()
         _shot(p, f"bot_4_waiting_{theme}.png")
+
+        # 5) низ вкладки: болталка, автозапуск и журнал эфира (они ниже сгиба)
+        p._on_bot_event("say", {"text": "Чат ожил — значит, было за что."})
+        p._on_bot_event("say", {"text": "Эфир 1 ч 12 мин · 4 метки · чат 31 сообщ/мин"})
+        scroll = p.findChild(QScrollArea)
+        if scroll:
+            bar = scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        app.processEvents()
+        _shot(p, f"bot_5_bottom_{theme}.png")
         p.deleteLater()
 
     print("Готово.")
